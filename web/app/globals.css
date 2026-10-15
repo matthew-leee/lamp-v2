@@ -1,0 +1,145 @@
+@import "tailwindcss";
+
+/*
+  Awwwards / Webby Architectural Design System:
+  - Inspired by Oakâme (#F6F1EB / #1E1B18), Palmer Tableware (spatial canvas &
+    tactile stage), and Urban Jürgensen (archival numbered edition grid).
+  - Dual room atmosphere: Daylight 5500K (:root) and Nocturne 2700K
+    (html[data-atmosphere="night"]).
+*/
+
+@theme {
+  --color-bone: #f6f1eb;
+  --color-ecru: #ece4d7;
+  --color-sand: #ddd3c2;
+  --color-linen: #c8bba6;
+  --color-charcoal: #1e1b18;
+  --color-ink-soft: #5a534a;
+  --color-glow: #e59a32;
+  --color-glow-ember: #b97a1f;
+  --color-error: #a3261c;
+  --color-success: #26633b;
+}
+
+:root {
+  --surface-page: #f6f1eb;
+  --surface-card: #fbf9f5;
+  --surface-elevated: #f1eae0;
+  --surface-stage: #eae1d3;
+  --surface-glass: rgba(246, 241, 235, 0.86);
+  --text-primary: #1e1b18;
+  --text-secondary: #5a534a;
+  --border-hairline: #ddd3c2;
+  --border-strong: #1e1b18;
+}
+
+html[data-atmosphere="night"] {
+  --color-bone: #11100e;
+  --color-ecru: #191714;
+  --color-sand: #2c2822;
+  --color-linen: #3e382f;
+  --color-charcoal: #f4efe6;
+  --color-ink-soft: #a89f91;
+  --color-glow: #f2a93b;
+  --color-glow-ember: #d4882a;
+  --surface-page: #11100e;
+  --surface-card: #171512;
+  --surface-elevated: #1e1b17;
+  --surface-stage: #151310;
+  --surface-glass: rgba(17, 16, 14, 0.86);
+  --text-primary: #f4efe6;
+  --text-secondary: #a89f91;
+  --border-hairline: #2c2822;
+  --border-strong: #f4efe6;
+}
+
+@theme inline {
+  --font-display: var(--font-fraunces), "Noto Serif TC", Georgia, serif;
+  --font-sans: var(--font-space-grotesk), "Noto Sans TC", system-ui, sans-serif;
+  --font-display-tc: var(--font-noto-serif-tc), var(--font-fraunces), serif;
+  --font-sans-tc: var(--font-noto-sans-tc), var(--font-space-grotesk), sans-serif;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--surface-page);
+  color: var(--text-primary);
+  transition:
+    background-color 650ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 650ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.glass-header {
+  background-color: var(--surface-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border-hairline);
+  transition:
+    background-color 650ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 650ms ease;
+}
+
+.card-exhibition {
+  background-color: var(--surface-card);
+  border: 1px solid var(--border-hairline);
+  transition:
+    background-color 650ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 400ms ease,
+    transform 400ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 500ms ease;
+}
+
+.card-exhibition:hover {
+  border-color: var(--color-glow);
+}
+
+.stage-surface {
+  background-color: var(--surface-stage);
+  transition: background-color 650ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+  Physically inspired 2700K radial light falloff behind lit lamps.
+*/
+.halo-2700k {
+  background:
+    radial-gradient(
+      circle at 50% 38%,
+      hsl(var(--art-hue, 38) 85% 64% / 0.38) 0%,
+      hsl(var(--art-hue, 38) 78% 58% / 0.16) 36%,
+      transparent 68%
+    ),
+    radial-gradient(
+      circle at 50% 74%,
+      color-mix(in srgb, var(--color-glow) 28%, transparent) 0%,
+      transparent 62%
+    );
+  transition: opacity 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.warm-photo-cast {
+  background: radial-gradient(
+    circle at 50% 36%,
+    color-mix(in srgb, var(--color-glow) 32%, transparent) 0%,
+    transparent 74%
+  );
+  mix-blend-mode: soft-light;
+  transition: opacity 700ms ease;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+}

@@ -63,7 +63,7 @@ UPDATE products SET
     dimensions = 'Ø 160 × H 238 mm',
     light_source = '2700K Integrated LED · 2.5W · Stepless / 3-Step Dimmer',
     image_day_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/Opal-Beige.png',
-    image_lit_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/50422_526bb8d3-8bb4-4182-8b1a-968313788068.webp'
+    image_lit_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/Opal-Beige.png'
 WHERE slug = 'panthella-160-v3-beige';
 
 UPDATE products SET
@@ -73,7 +73,7 @@ UPDATE products SET
     dimensions = 'Ø 160 × H 238 mm',
     light_source = '2700K Integrated LED · 2.5W · Stepless / 3-Step Dimmer',
     image_day_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/54067_54067_Panthella-Portable-White-V2-02-1-5-91771.webp',
-    image_lit_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/pdp-panthella160portable-gallery-2.webp'
+    image_lit_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/54067_54067_Panthella-Portable-White-V2-02-1-5-91771.webp'
 WHERE slug = 'panthella-160-v3-white-opal';
 
 UPDATE products SET
@@ -83,7 +83,7 @@ UPDATE products SET
     dimensions = 'Ø 160 × H 238 mm',
     light_source = '2700K Integrated LED · 2.5W · Stepless / 3-Step Dimmer',
     image_day_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/Chrome-Opal-Beige.png',
-    image_lit_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/pdp-panthella160portable-gallery-4.webp'
+    image_lit_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/Chrome-Opal-Beige.png'
 WHERE slug = 'panthella-160-v3-opal-beige-chrome';
 
 UPDATE products SET
@@ -113,7 +113,7 @@ UPDATE products SET
     dimensions = 'Ø 200 × H 355 mm',
     light_source = 'E14 · 2700K Warm White · Hand-Blown Triple Opal Glass',
     image_day_url = 'https://cdn.shopify.com/s/files/1/0913/3370/products/10596_10596_PH-2-1-Table-Chrome-01-1-5-91418.png',
-    image_lit_url = 'https://cdn.shopify.com/s/files/1/0913/3370/files/50422_83e31b37-2707-4a9c-837f-f1eafcc0218e.webp'
+    image_lit_url = 'https://cdn.shopify.com/s/files/1/0913/3370/products/10596_10596_PH-2-1-Table-Chrome-01-1-5-91418.png'
 WHERE slug = 'ph-2-1-table-chrome';
 
 UPDATE products SET
