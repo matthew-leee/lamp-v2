@@ -1,5 +1,5 @@
-import { interpolateCopy } from "./format";
-import type { Locale } from "./i18n";
+import { interpolateCopy } from "./format.ts";
+import type { Locale } from "./i18n.ts";
 
 export type ArtVariant = "dome" | "shades" | "shades-tall" | "piano";
 

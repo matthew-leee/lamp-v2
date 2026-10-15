@@ -1,4 +1,4 @@
-import { isCjk, t, ui, type Locale } from "./i18n";
+import { isCjk, t, ui, type Locale } from "./i18n.ts";
 
 const CURRENCY_PREFIX: Record<string, string> = {
   HKD: "HK$",
