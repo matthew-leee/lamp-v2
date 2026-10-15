@@ -1,0 +1,121 @@
+# Production stack for Hetzner CX33 (4 vCPU, 8 GB RAM) behind Cloudflare (OPS-01, BUDGET-01).
+# Every company scalar is env-supplied (ENV-01, NAME-01); zero hardcoded brand literals.
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    user: "70:70"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-storefront}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-storefront}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./api/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-storefront} -d $${POSTGRES_DB:-storefront}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    cpus: "1.0"
+    mem_limit: 2g
+    networks:
+      - backend
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    user: "10001:10001"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-storefront}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-storefront}
+      PORT: "8080"
+      CORS_ORIGIN: ${NEXT_PUBLIC_SITE_URL:?NEXT_PUBLIC_SITE_URL is required}
+      MAX_POOL_CONNECTIONS: ${MAX_POOL_CONNECTIONS:-10}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      CARD_RESERVATION_TTL_MINS: ${CARD_RESERVATION_TTL_MINS:-30}
+      FPS_RESERVATION_TTL_HOURS: ${FPS_RESERVATION_TTL_HOURS:-24}
+      CURRENCY: ${NEXT_PUBLIC_CURRENCY:-HKD}
+      LOCALES: ${NEXT_PUBLIC_LOCALES:-en,zh-HK}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    cpus: "1.5"
+    mem_limit: 2g
+    networks:
+      - backend
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_BRAND_NAME: ${NEXT_PUBLIC_BRAND_NAME:?NEXT_PUBLIC_BRAND_NAME is required}
+        NEXT_PUBLIC_BRAND_NAME_NATIVE: ${NEXT_PUBLIC_BRAND_NAME_NATIVE:-}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:?NEXT_PUBLIC_SITE_URL is required}
+        NEXT_PUBLIC_API_URL: http://api:8080
+        NEXT_PUBLIC_CURRENCY: ${NEXT_PUBLIC_CURRENCY:-HKD}
+        NEXT_PUBLIC_LOCALES: ${NEXT_PUBLIC_LOCALES:-en,zh-HK}
+    restart: unless-stopped
+    user: "1000:1000"
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_BRAND_NAME: ${NEXT_PUBLIC_BRAND_NAME}
+      NEXT_PUBLIC_BRAND_NAME_NATIVE: ${NEXT_PUBLIC_BRAND_NAME_NATIVE:-}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL}
+      NEXT_PUBLIC_API_URL: http://api:8080
+      NEXT_PUBLIC_WHATSAPP_NUMBER: ${NEXT_PUBLIC_WHATSAPP_NUMBER:-}
+      NEXT_PUBLIC_CURRENCY: ${NEXT_PUBLIC_CURRENCY:-HKD}
+      NEXT_PUBLIC_LOCALES: ${NEXT_PUBLIC_LOCALES:-en,zh-HK}
+      NEXT_PUBLIC_GA_MEASUREMENT_ID: ${NEXT_PUBLIC_GA_MEASUREMENT_ID:-}
+      NEXT_PUBLIC_GSC_VERIFICATION: ${NEXT_PUBLIC_GSC_VERIFICATION:-}
+      NEXT_PUBLIC_AVAILABILITY_TTL_MS: ${NEXT_PUBLIC_AVAILABILITY_TTL_MS:-60000}
+      NEXT_PUBLIC_FETCH_TIMEOUT_MS: ${NEXT_PUBLIC_FETCH_TIMEOUT_MS:-10000}
+      NEXT_PUBLIC_CONTENT_REVALIDATE_SECONDS: ${NEXT_PUBLIC_CONTENT_REVALIDATE_SECONDS:-60}
+    cpus: "1.0"
+    mem_limit: 2g
+    networks:
+      - backend
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - web
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:-localhost}
+    volumes:
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    cpus: "0.5"
+    mem_limit: 512m
+    networks:
+      - backend
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend:
+    driver: bridge

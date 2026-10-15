@@ -1,0 +1,23 @@
+# Build artifacts
+node_modules/
+.next/
+out/
+target/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Business documents: contain cost/margin data; this repo is public.
+# Authoritative copies live on disk at the repo root, intentionally untracked.
+Vision.md
+docs/designs/
+
+# Demo imagery fetched from brand sites during development only.
+# Placeholders to be replaced by our own photography before launch.
+web/public/demo-assets/
+
+# OS / editor
+.DS_Store
+*.log

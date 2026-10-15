@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "v2-flagship"]
+  pull_request:
+
+jobs:
+  api:
+    name: Rust API (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: scratch-only
+          POSTGRES_DB: hvile_scratch
+        ports:
+          - 127.0.0.1:55433:5432
+        options: >-
+          --health-cmd="pg_isready -U ci_user -d hvile_scratch"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        working-directory: api
+        run: cargo fmt --check
+      - name: Run Clippy
+        working-directory: api
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Run unit & DB integration tests
+        working-directory: api
+        env:
+          HVILE_TEST_DATABASE_URL: postgres://ci_user:scratch-only@localhost:55433/hvile_scratch
+        run: cargo test
+
+  web:
+    name: Next.js Web (lint, typecheck, build, test)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: verify-only
+          POSTGRES_DB: storefront_verify
+        ports:
+          - 127.0.0.1:55432:5432
+        options: >-
+          --health-cmd="pg_isready -U ci_user -d storefront_verify"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Apply migrations 0001..0006
+        run: |
+          for f in api/migrations/000*.sql; do
+            PGPASSWORD=verify-only psql -h 127.0.0.1 -p 55432 -U ci_user -d storefront_verify -v ON_ERROR_STOP=1 -f "$f"
+          done
+      - name: Start Rust API in background
+        working-directory: api
+        env:
+          DATABASE_URL: postgres://ci_user:verify-only@127.0.0.1:55432/storefront_verify
+          PORT: "18080"
+          SESSION_SECRET: "0123456789abcdef0123456789abcdef0123456789abcdef"
+          ADMIN_USERNAME: "admin-test"
+          ADMIN_PASSWORD: "test-admin-password-fake-0001"
+          SESSION_COOKIE_SECURE: "false"
+          STRIPE_WEBHOOK_SECRET: "whsec_test_secret_0123456789abcdef"
+        run: |
+          cargo build --bin lamp-api
+          ./target/debug/lamp-api >/tmp/api.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:18080/health && break
+            sleep 1
+          done
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Typecheck & Lint
+        working-directory: web
+        run: |
+          npm run typecheck
+          npm run lint
+      - name: Build production storefront
+        working-directory: web
+        env:
+          NEXT_PUBLIC_SITE_URL: http://localhost:3000
+          NEXT_PUBLIC_API_URL: http://127.0.0.1:18080
+        run: |
+          BRAND="$(PGPASSWORD=verify-only psql -h 127.0.0.1 -p 55432 -U ci_user -d storefront_verify -tAc "SELECT COALESCE((SELECT value FROM settings WHERE key='brand.name'), 'HVILE')")"
+          NEXT_PUBLIC_BRAND_NAME="$BRAND" npm run build
+      - name: Run full web test suite
+        working-directory: web
+        run: npm test

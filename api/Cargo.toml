@@ -1,0 +1,47 @@
+[package]
+name = "lamp-api"
+version = "0.1.0"
+edition = "2021"
+
+# Library target holds the reusable helpers (money, slug); the binary target
+# holds the Axum server. Splitting them keeps the helpers usable (and testable)
+# without dead-code warnings in a binary-only crate.
+[lib]
+name = "lamp_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lamp-api"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+# argon2id password hashing (PHC strings) for admin login (ADMIN-01).
+argon2 = "0.5"
+axum = "0.8"
+# Declared directly because product JSON includes `created_at` (TIMESTAMPTZ) as a
+# `chrono::DateTime<Utc>` with serde support; sqlx's `chrono` feature maps the type.
+chrono = { version = "0.4", features = ["serde"] }
+# HMAC-SHA256 for stateless session tokens (admin auth; see 0004_admin.sql).
+hmac = "0.12"
+# hyper 1 HTTP/1 CLIENT half (feature `client`) for the commitment-5b
+# revalidation webhook: a plain `hyper::client::conn::http1` handshake over a
+# tokio TcpStream. No TLS on purpose — REVALIDATE_URL must be an absolute
+# http:// URL (the web tier runs next to the API over plain HTTP).
+hyper = { version = "1", features = ["client", "http1"] }
+# hyper's tokio IO adapter (`TokioIo`): hyper 1 speaks its own `rt::Read`/
+# `rt::Write` traits, and this is the maintained bridge from `tokio::net::TcpStream`.
+# Already in the tree via axum; no new transitive deps.
+hyper-util = { version = "0.1", features = ["tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# tower::ServiceExt::oneshot drives the router in HTTP contract tests.
+tower = { version = "0.5", features = ["util"] }
