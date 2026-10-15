@@ -1437,6 +1437,221 @@ pub async fn update_product_full(
     Ok(Json(product))
 }
 
+/// Request body for `POST /api/admin/products/{id}/inspect-quarantine`.
+#[derive(Debug, Deserialize)]
+pub struct InspectQuarantineInput {
+    /// `"restock"` (pass inspection -> return to saleable stock) or
+    /// `"write_off"` (damaged -> remove from both stock_quarantined and stock_total).
+    pub action: String,
+    #[serde(default = "default_one")]
+    pub quantity: i32,
+}
+
+fn default_one() -> i32 {
+    1
+}
+
+/// `POST /api/admin/products/{id}/clone` — 1-click duplicate of an existing
+/// SKU (copies family specs, media slots, reference price and all bilingual
+/// `product_content` rows into a new inactive SKU so the operator only edits
+/// the new colourway/slug).
+pub async fn clone_product(
+    State(app): State<AppState>,
+    user: Option<Extension<CurrentUser>>,
+    Path(id): Path<String>,
+) -> Result<Json<AdminProductFull>, ApiError> {
+    let actor = actor(user)?;
+    let id: i64 = id.parse().map_err(|_| bad_request("invalid product id"))?;
+    validate_product_id(id).map_err(bad_request)?;
+    let pool = state::require_pool(&app)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| state::database_unavailable("failed to open clone transaction", &e))?;
+    let Some(source) = load_product_full(&mut tx, id)
+        .await
+        .map_err(|e| state::database_unavailable("failed to load source product", &e))?
+    else {
+        return Err(not_found("product not found"));
+    };
+
+    let suffix = (Utc::now().timestamp_millis() % 100_000).abs();
+    let base_slug = if source.slug.len() > 50 {
+        &source.slug[..50]
+    } else {
+        &source.slug
+    };
+    let new_slug = format!("{base_slug}-copy-{suffix}");
+
+    let new_id: i64 = sqlx::query_scalar(
+        "INSERT INTO products \
+             (slug, brand, model, price_cents, family, art_variant, art_hue, active, \
+              stock_total, stock_reserved, stock_quarantined, image_day_url, image_lit_url, \
+              designer, design_year, dimensions, light_source) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, 0, 0, 0, $8, $9, $10, $11, $12, $13) \
+         RETURNING id",
+    )
+    .bind(&new_slug)
+    .bind(&source.brand)
+    .bind(format!("{} (Copy)", source.model))
+    .bind(source.price_cents)
+    .bind(&source.family)
+    .bind(&source.art_variant)
+    .bind(source.art_hue)
+    .bind(&source.image_day_url)
+    .bind(&source.image_lit_url)
+    .bind(&source.designer)
+    .bind(&source.design_year)
+    .bind(&source.dimensions)
+    .bind(&source.light_source)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| state::database_unavailable("failed to insert cloned product", &e))?;
+
+    for (locale, fields) in &source.content {
+        for (field, value) in fields {
+            sqlx::query(
+                "INSERT INTO product_content (product_id, locale, field, value) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(new_id)
+            .bind(locale)
+            .bind(field)
+            .bind(value)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| state::database_unavailable("failed to copy product content", &e))?;
+        }
+    }
+
+    if let Some(ref_price) = &source.reference_price {
+        sqlx::query(
+            "INSERT INTO reference_prices \
+                 (product_id, min_price_cents, max_price_cents, source_name, source_url, checked_on) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(new_id)
+        .bind(ref_price.min_price_cents)
+        .bind(ref_price.max_price_cents)
+        .bind(&ref_price.source_name)
+        .bind(&ref_price.source_url)
+        .bind(ref_price.checked_on)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| state::database_unavailable("failed to copy reference price", &e))?;
+    }
+
+    insert_audit(
+        &mut tx,
+        &actor,
+        "clone",
+        "products",
+        Some(&new_id.to_string()),
+        serde_json::json!({ "source_id": id, "new_slug": new_slug }),
+    )
+    .await
+    .map_err(|e| state::database_unavailable("failed to audit product clone", &e))?;
+
+    let cloned = load_product_full(&mut tx, new_id)
+        .await
+        .map_err(|e| state::database_unavailable("failed to load cloned product", &e))?
+        .ok_or_else(|| not_found("product not found"))?;
+    tx.commit()
+        .await
+        .map_err(|e| state::database_unavailable("failed to commit product clone", &e))?;
+
+    Ok(Json(cloned))
+}
+
+/// `POST /api/admin/products/{id}/inspect-quarantine` — resolves quarantined
+/// units after physical inspection (`"restock"` returns them to saleable
+/// stock; `"write_off"` removes them from both `stock_quarantined` and
+/// `stock_total`).
+pub async fn inspect_quarantine(
+    State(app): State<AppState>,
+    user: Option<Extension<CurrentUser>>,
+    Path(id): Path<String>,
+    body: Result<Json<InspectQuarantineInput>, JsonRejection>,
+) -> Result<Json<AdminProductFull>, ApiError> {
+    let actor = actor(user)?;
+    let id: i64 = id.parse().map_err(|_| bad_request("invalid product id"))?;
+    validate_product_id(id).map_err(bad_request)?;
+    let input = json_body(body)?;
+    if input.quantity < 1 {
+        return Err(bad_request("quantity must be >= 1"));
+    }
+    if !matches!(input.action.as_str(), "restock" | "write_off") {
+        return Err(bad_request("action must be \"restock\" or \"write_off\""));
+    }
+    let pool = state::require_pool(&app)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| state::database_unavailable("failed to open quarantine transaction", &e))?;
+    let Some((stock_total, stock_quarantined)): Option<(i32, i32)> = sqlx::query_as(
+        "SELECT stock_total, stock_quarantined FROM products WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| state::database_unavailable("failed to lock product", &e))?
+    else {
+        return Err(not_found("product not found"));
+    };
+
+    if stock_quarantined < input.quantity {
+        return Err(conflict("insufficient quarantined stock"));
+    }
+
+    if input.action == "restock" {
+        sqlx::query("UPDATE products SET stock_quarantined = stock_quarantined - $1 WHERE id = $2")
+            .bind(input.quantity)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| state::database_unavailable("failed to restock from quarantine", &e))?;
+    } else {
+        sqlx::query(
+            "UPDATE products SET stock_quarantined = stock_quarantined - $1, \
+                 stock_total = stock_total - $1 WHERE id = $2",
+        )
+        .bind(input.quantity)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| state::database_unavailable("failed to write off quarantined stock", &e))?;
+    }
+
+    insert_audit(
+        &mut tx,
+        &actor,
+        "inspect_quarantine",
+        "products",
+        Some(&id.to_string()),
+        serde_json::json!({
+            "action": input.action,
+            "quantity": input.quantity,
+            "previous_total": stock_total,
+            "previous_quarantined": stock_quarantined,
+        }),
+    )
+    .await
+    .map_err(|e| state::database_unavailable("failed to audit quarantine inspection", &e))?;
+
+    let updated = load_product_full(&mut tx, id)
+        .await
+        .map_err(|e| state::database_unavailable("failed to load updated product", &e))?
+        .ok_or_else(|| not_found("product not found"))?;
+    tx.commit()
+        .await
+        .map_err(|e| state::database_unavailable("failed to commit quarantine inspection", &e))?;
+
+    fire_revalidation("catalogue");
+    Ok(Json(updated))
+}
+
 // ---------------------------------------------------------------------------
 // Handlers: product_content
 // ---------------------------------------------------------------------------

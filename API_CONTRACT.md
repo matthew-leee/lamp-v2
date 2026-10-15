@@ -149,10 +149,17 @@ Sweeps expired holds and returns public order status (`Cache-Control: no-store`,
     "currency": "HKD",
     "payment_method": "card",
     "status": "reserved",
+    "fps_reference": "",
     "expires_at": "2026-10-15T06:30:00Z",
     "created_at": "2026-10-15T06:00:00Z"
   }
   ```
+
+### `POST /api/orders/{order_code}/submit-fps`
+Allows a customer with an FPS reservation to submit their bank transfer reference (`{"fps_reference": "..."}`). Returns `200 OK` `PublicOrderStatus`.
+
+### `POST /api/orders/{order_code}/cancel`
+Allows a customer with an unpaid `reserved` order to self-cancel the hold (freeing `stock_reserved` immediately so they can switch payment methods or release the piece). Returns `200 OK` `PublicOrderStatus`.
 
 ### `POST /api/webhooks/stripe`
 Payment settlement authority (`PAY-01`). Requires header `Stripe-Signature: t=<unix_ts>,v1=<hex_hmac_sha256>` signed with `STRIPE_WEBHOOK_SECRET` over `<unix_ts>.<raw_body>`.
@@ -172,6 +179,8 @@ All non-`GET` requests under `/api/admin/*` require header `X-Requested-With: XM
 - `GET /api/admin/products/{id}` -> `200 OK` `AdminProductFull` (complete product aggregate including `stock_total`, `stock_reserved`, `stock_quarantined`, `image_day_url`, `image_lit_url`, `designer`, `design_year`, `dimensions`, `light_source`, `content`, `reference_price`, `pieces` — works for both active and inactive products)
 - `PUT /api/admin/products/{id}` -> Partial product update
 - `PUT /api/admin/products/{id}/full` -> Atomic full-product save (product fields + optional `stock_total`/`stock_quarantined` + `content` map + `reference_price` upsert/null-delete in one transaction)
+- `POST /api/admin/products/{id}/clone` -> 1-click duplicate of product `#id` (copies specs, media URLs, reference price, and bilingual copy into a new inactive SKU) -> `200 OK` `AdminProductFull`
+- `POST /api/admin/products/{id}/inspect-quarantine` -> Body `{"action": "restock" | "write_off", "quantity": 1}` -> resolves quarantined units after physical inspection -> `200 OK` `AdminProductFull`
 - `PUT /api/admin/product-content` -> Upsert `(product_id, locale, field, value)`
 - `PUT / DELETE /api/admin/reference-prices/{product_id}` -> Upsert or delete reference price
 - `POST /api/admin/pieces`, `PATCH / DELETE /api/admin/pieces/{piece_no}` -> Create, reassign (`{"product_id": N}`), or delete a numbered piece
@@ -179,6 +188,7 @@ All non-`GET` requests under `/api/admin/*` require header `X-Requested-With: XM
 - `PUT / DELETE /api/admin/settings/{key}` -> Upsert (`{"value": "..."}`) or delete runtime setting override
 - `GET /api/admin/orders` -> Last 200 orders newest-first
 - `POST /api/admin/orders/{id}/confirm-fps` -> Body `{"fps_reference": "..."}` (marks `reserved` FPS order `paid` or `expired` FPS order `late_payment_review`)
+- `POST /api/admin/orders/{id}/fulfil` -> Marks a `paid` order `fulfilled`
 - `POST /api/admin/orders/{id}/release` -> Releases an unpaid `reserved` order (`cancelled`, returns `stock_reserved`)
 - `POST /api/admin/orders/{id}/quarantine-return` -> Marks a `paid`/`fulfilled` order `returned_quarantined` and increments both `stock_total` and `stock_quarantined`
 - `GET /api/admin/audit-log` -> Last 200 audit log entries newest-first

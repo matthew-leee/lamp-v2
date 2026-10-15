@@ -133,6 +133,11 @@ fn app(state: AppState) -> Router {
             get(admin_crud::get_product_full).put(admin_crud::update_product),
         )
         .route("/products/{id}/full", put(admin_crud::update_product_full))
+        .route("/products/{id}/clone", post(admin_crud::clone_product))
+        .route(
+            "/products/{id}/inspect-quarantine",
+            post(admin_crud::inspect_quarantine),
+        )
         .route("/product-content", put(admin_crud::upsert_product_content))
         .route(
             "/reference-prices/{product_id}",
@@ -157,6 +162,7 @@ fn app(state: AppState) -> Router {
         // CSRF middleware as the rest of the console.
         .route("/orders", get(orders::list_orders))
         .route("/orders/{id}/confirm-fps", post(orders::confirm_fps_order))
+        .route("/orders/{id}/fulfil", post(orders::fulfil_order))
         .route("/orders/{id}/release", post(orders::release_order))
         .route(
             "/orders/{id}/quarantine-return",
@@ -179,6 +185,14 @@ fn app(state: AppState) -> Router {
         // webhook authenticates by `Stripe-Signature`, not by cookie.
         .route("/api/orders/reserve", post(orders::create_reservation))
         .route("/api/orders/{order_code}", get(orders::get_order_by_code))
+        .route(
+            "/api/orders/{order_code}/submit-fps",
+            post(orders::submit_customer_fps),
+        )
+        .route(
+            "/api/orders/{order_code}/cancel",
+            post(orders::cancel_customer_order),
+        )
         .route("/api/webhooks/stripe", post(orders::stripe_webhook))
         .route("/api/admin/login", post(admin::login))
         .nest("/api/admin", admin_protected)

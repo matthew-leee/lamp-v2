@@ -130,6 +130,7 @@ pub struct PublicOrderStatus {
     pub currency: String,
     pub payment_method: String,
     pub status: String,
+    pub fps_reference: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
@@ -899,7 +900,7 @@ pub async fn get_order_by_code(
         .map_err(|e| state::database_unavailable("failed to expire stale reservations", &e))?;
     let order = sqlx::query_as::<_, PublicOrderStatus>(
         "SELECT order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
-             payment_method, status, expires_at, created_at \
+             payment_method, status, fps_reference, expires_at, created_at \
          FROM orders WHERE order_code = $1",
     )
     .bind(&order_code)
@@ -1256,6 +1257,162 @@ pub async fn quarantine_return_order(
         &mut tx,
         &actor,
         "quarantine_return",
+        "orders",
+        Some(&order.id.to_string()),
+        serde_json::json!({ "order_code": order.order_code, "quantity": order.quantity }),
+    )
+    .await
+    .map_err(|e| state::database_unavailable("failed to write audit row", &e))?;
+
+    finish_order_mutation(tx, order.id).await
+}
+
+/// `POST /api/orders/{order_code}/submit-fps` — customer submits their HK FPS
+/// transfer reference directly from the checkout screen.
+pub async fn submit_customer_fps(
+    State(app): State<AppState>,
+    Path(order_code): Path<String>,
+    body: Result<Json<ConfirmFpsRequest>, JsonRejection>,
+) -> Result<Json<PublicOrderStatus>, ApiError> {
+    let body = json_body(body)?;
+    let fps_ref = body.fps_reference.trim();
+    if fps_ref.is_empty() {
+        return Err(bad_request("fps_reference is required"));
+    }
+    if fps_ref.contains('\0') {
+        return Err(bad_request("fps_reference contains a NUL byte"));
+    }
+    let pool = state::require_pool(&app)?;
+    sweep_stale_reservations(pool)
+        .await
+        .map_err(|e| state::database_unavailable("failed to expire stale reservations", &e))?;
+
+    let mut tx = begin_order_tx(pool, "customer FPS reference").await?;
+    let Some(order) = lock_order_by_code(&mut tx, &order_code)
+        .await
+        .map_err(|e| state::database_unavailable("failed to load order", &e))?
+    else {
+        return Err(not_found("order not found"));
+    };
+    if order.payment_method != "fps" {
+        return Err(conflict("order does not use FPS payment"));
+    }
+    let next_status = match order.status.as_str() {
+        "reserved" => "reserved",
+        "expired" => "late_payment_review",
+        _ => return Err(conflict("order is not awaiting FPS reference")),
+    };
+
+    sqlx::query(
+        "UPDATE orders SET fps_reference = $2, status = $3, updated_at = now() WHERE id = $1",
+    )
+    .bind(order.id)
+    .bind(fps_ref)
+    .bind(next_status)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| state::database_unavailable("failed to save FPS reference", &e))?;
+
+    let updated = sqlx::query_as::<_, PublicOrderStatus>(
+        "SELECT order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
+             payment_method, status, fps_reference, expires_at, created_at \
+         FROM orders WHERE id = $1",
+    )
+    .bind(order.id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| state::database_unavailable("failed to reload order", &e))?;
+    tx.commit()
+        .await
+        .map_err(|e| state::database_unavailable("failed to commit FPS reference", &e))?;
+    Ok(Json(updated))
+}
+
+/// `POST /api/orders/{order_code}/cancel` — customer self-cancels an unpaid
+/// reservation hold (e.g. to switch payment method or free the piece).
+pub async fn cancel_customer_order(
+    State(app): State<AppState>,
+    Path(order_code): Path<String>,
+) -> Result<Json<PublicOrderStatus>, ApiError> {
+    let pool = state::require_pool(&app)?;
+    sweep_stale_reservations(pool)
+        .await
+        .map_err(|e| state::database_unavailable("failed to expire stale reservations", &e))?;
+
+    let mut tx = begin_order_tx(pool, "customer cancel order").await?;
+    let Some(order) = lock_order_by_code(&mut tx, &order_code)
+        .await
+        .map_err(|e| state::database_unavailable("failed to load order", &e))?
+    else {
+        return Err(not_found("order not found"));
+    };
+    if release_transition(&order.status) == ReleaseTransition::Reject {
+        return Err(conflict("order is not reserved"));
+    }
+
+    sqlx::query(
+        "UPDATE products SET stock_reserved = GREATEST(0, stock_reserved - $1) WHERE id = $2",
+    )
+    .bind(order.quantity)
+    .bind(order.product_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| state::database_unavailable("failed to release reserved stock", &e))?;
+    sqlx::query("UPDATE orders SET status = 'cancelled', updated_at = now() WHERE id = $1")
+        .bind(order.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| state::database_unavailable("failed to cancel order", &e))?;
+
+    let updated = sqlx::query_as::<_, PublicOrderStatus>(
+        "SELECT order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
+             payment_method, status, fps_reference, expires_at, created_at \
+         FROM orders WHERE id = $1",
+    )
+    .bind(order.id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| state::database_unavailable("failed to reload order", &e))?;
+    tx.commit()
+        .await
+        .map_err(|e| state::database_unavailable("failed to commit order cancellation", &e))?;
+    Ok(Json(updated))
+}
+
+/// `POST /api/admin/orders/{id}/fulfil` — marks a `paid` order as `fulfilled`
+/// once dispatched or handed over to the collector.
+pub async fn fulfil_order(
+    State(app): State<AppState>,
+    user: Option<Extension<CurrentUser>>,
+    Path(id): Path<i64>,
+) -> Result<Json<AdminOrder>, ApiError> {
+    let actor = actor(user)?;
+    let pool = state::require_pool(&app)?;
+
+    let mut tx = begin_order_tx(pool, "order fulfilment").await?;
+    expire_stale_reservations(&mut tx)
+        .await
+        .map_err(|e| state::database_unavailable("failed to expire stale reservations", &e))?;
+    let Some(order) = lock_order_by_id(&mut tx, id)
+        .await
+        .map_err(|e| state::database_unavailable("failed to load order", &e))?
+    else {
+        return Err(not_found("order not found"));
+    };
+    if order.status != "paid" {
+        return Err(conflict("order is not paid"));
+    }
+
+    sqlx::query("UPDATE orders SET status = 'fulfilled', updated_at = now() WHERE id = $1")
+        .bind(order.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| state::database_unavailable("failed to mark order fulfilled", &e))?;
+
+    insert_audit(
+        &mut tx,
+        &actor,
+        "fulfil",
         "orders",
         Some(&order.id.to_string()),
         serde_json::json!({ "order_code": order.order_code, "quantity": order.quantity }),

@@ -18,6 +18,9 @@ docs/designs/
 # Placeholders to be replaced by our own photography before launch.
 web/public/demo-assets/
 
+# UI/UX verification screenshot archives (session-traceable local artifacts).
+artifacts/
+
 # OS / editor
 .DS_Store
 *.log
