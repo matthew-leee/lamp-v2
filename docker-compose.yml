@@ -127,7 +127,7 @@ services:
     restart: unless-stopped
     depends_on:
       - caddy
-    command: tunnel --no-autoupdate --url http://caddy:80
+    command: tunnel --no-autoupdate --url http://caddy:8080
     cpus: "0.25"
     mem_limit: 256m
     networks:

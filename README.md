@@ -23,6 +23,12 @@ Production-ready bilingual (`en` / `zh-HK`) ecommerce flagship and operator stud
    - **Unified Single-Save Product Studio (`/admin/products/[id]`)** with real-time as-you-type stage preview, **direct photo file upload**, **1-click Duplicate/Clone SKU**, human **Dollar** price inputs, `art_variant` (`dome | shades | shades-tall | piano | none`), side-by-side `EN | 繁體中文` copy editors, and **Quarantine Inspection** (*Pass Inspection -> Restock* or *Write Off Damaged*).
    - **Multi-SKU Orders & Quarantine Console (`/admin/orders`)** and **Live Company & FPS Settings (`/admin/settings`)**.
 
+## Deployment (Finland Hetzner CX33 + Cloudflare Tunnel & Auto-HTTPS)
+
+The full Docker Compose stack (`db`, `api`, `web`, `caddy`, `cloudflared`) runs in isolation on the Hetzner CX33 (`89.167.15.159` under `/opt/storefront-v2`) without touching any existing host services or Tailscale listeners (`BIND_IP=89.167.15.159`):
+- **Automatic Let's Encrypt HTTPS (`sslip.io`)**: `https://89-167-15-159.sslip.io`
+- **Cloudflare Tunnel (`cloudflared`)**: forwards `http://caddy:8080` to a public `*.trycloudflare.com` HTTPS endpoint (compatible with NordVPN without needing Tailscale).
+
 ## Development & Verification
 
 ```bash

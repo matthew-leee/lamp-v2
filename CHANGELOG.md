@@ -20,7 +20,9 @@
 - **De-branded Test & DB Identifiers (`NAME-01`)**:
   - Replaced all remaining stale working-name identifiers in Rust tests and CI workflows with neutral `STOREFRONT_TEST_DATABASE_URL` / `storefront_scratch` / `ATELIER` naming.
 - **5-Stage Real-Browser UI/UX Verification (`QA-01`)**:
-  - Executed and archived 27 Desktop (`1440x900`) and Mobile (`390x844`) `.jpg` screenshots and `INDEX.md` in `artifacts/ui-audit/20261016__session-01a143c3-57df-76fa-8e6f-8dd98a6389f2/`.
+  - Executed and archived 29 Desktop (`1440x900`) and Mobile (`390x844`) `.jpg` screenshots and `INDEX.md` in `artifacts/ui-audit/20261016__session-01a143c3-57df-76fa-8e6f-8dd98a6389f2/`.
+- **Finland Hetzner CX33 Test Deployment (`DEPLOY-01`, `OPS-01`)**:
+  - Deployed isolated Docker Compose stack (`db`, `api`, `web`, `caddy`, `cloudflared`) to `/opt/storefront-v2` on `89.167.15.159`, bound to the public eth0 IP (`BIND_IP=89.167.15.159`) so existing host services are undisturbed, exposed via both `https://89-167-15-159.sslip.io` (Let's Encrypt TLS) and Cloudflare Tunnel (`*.trycloudflare.com`), and verified live Postgres backup + scratch restore.
 
 ### Earlier v2 Clean-Room Baseline
 - **Clean-Room Guardrail & Architecture**: Wiped legacy `web/` from disk and Git history on orphan branch `v2-clean-room`, locked predecessor `webpage/web` via OS ACLs, and documented the pure backend contract in `API_CONTRACT.md`.
