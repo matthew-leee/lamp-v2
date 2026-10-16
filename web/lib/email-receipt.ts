@@ -243,11 +243,17 @@ export async function dispatchTransactionalEmail(opts: {
 
   // 2. Direct SMTPS (465) or STARTTLS (587) transport when SMTP_USER and SMTP_PASS are set
   const smtpUser = process.env.SMTP_USER?.trim();
-  const smtpPass = process.env.SMTP_PASS?.trim();
+  const rawPass = process.env.SMTP_PASS?.trim();
   const smtpHost =
     process.env.SMTP_HOST?.trim() ||
-    (smtpUser && smtpPass ? "smtp.gmail.com" : "");
+    (smtpUser && rawPass ? "smtp.gmail.com" : "");
   const smtpPort = Number.parseInt(process.env.SMTP_PORT?.trim() || "587", 10);
+  // Google Workspace / Gmail App Passwords are 16 alphanumeric characters;
+  // normalize any spaces or hyphens (e.g. xxxx-xxxx-xxxx-xxxx) for AUTH LOGIN.
+  const smtpPass =
+    rawPass && smtpHost.includes("gmail.com")
+      ? rawPass.replace(/[\s-]+/g, "")
+      : rawPass;
 
   if (smtpHost && smtpUser && smtpPass) {
     try {

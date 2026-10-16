@@ -4,7 +4,7 @@
 
 ### Fixed
 - **Stripe Dynamic Payment Methods Compatibility (`STRIPE-01`)**: Removed the deprecated `payment_method_types[0]=card` parameter from `POST /v1/checkout/sessions` in `web/app/api/orders/[code]/pay-card/route.ts` so Stripe accounts on newer API versions using dashboard-managed Dynamic Payment Methods create hosted Checkout Sessions (`cs_test_...`) without error.
-- **Hetzner SMTP Port 587 STARTTLS & Delivery Logging (`EMAIL-01`)**: Switched default `SMTP_PORT` from `465` (blocked outbound on Hetzner cloud) to `587` (`STARTTLS`) and added explicit `[email-receipt]` delivery and error logging in container stdout/stderr.
+- **Hetzner SMTP Port 587 STARTTLS, App-Password Normalization & Delivery Logging (`EMAIL-01`)**: Switched default `SMTP_PORT` from `465` (blocked outbound on Hetzner cloud) to `587` (`STARTTLS`), normalized hyphen/space-grouped Google App Passwords (`xxxx-xxxx-xxxx-xxxx`) for `AUTH LOGIN`, and added explicit `[email-receipt]` delivery and error logging in container stdout/stderr.
 
 ### Added & Updated (P1–P4 Milestones)
 - **Multi-SKU Shopping Cart (`CART-01`)**:
