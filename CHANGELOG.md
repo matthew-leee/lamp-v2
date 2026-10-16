@@ -2,7 +2,27 @@
 
 ## [Unreleased] — v2 Clean-Room Flagship & Operator Studio
 
-### Added
+### Added & Updated (P1–P4 Milestones)
+- **Multi-SKU Shopping Cart (`CART-01`)**:
+  - Renamed all storefront terminology from "Shopping Bag" to **Shopping Cart / Cart (`購物車` / `加入購物車`)**.
+  - Added migration `0007_multi_sku_fps_media.sql` creating `order_items` (`order_id`, `product_id`, `product_slug`, `quantity`, `unit_price_cents`, `line_total_cents`).
+  - Updated `POST /api/orders/reserve`, `GET /api/orders/{code}`, `POST /api/webhooks/stripe`, `confirm_fps`, `release`, `cancel`, `quarantine_return`, and `expire_stale_reservations` to atomically reserve, settle, expire, release, and quarantine **1 to all SKUs in the store** in a single transaction with sorted row locks.
+  - Updated Shopping Cart drawer, Checkout Settlement page, Collector's Pass, Email Receipts, and Admin Orders console to display all line items.
+- **Configurable HK FPS Settings (`FPS-01`)**:
+  - Added `payment.fps_id`, `payment.fps_account_name`, and `payment.fps_qr_url` to `PUBLIC_SETTING_KEYS` and `/admin/settings` with 0-second live propagation to the FPS checkout screen and zero hardcoded FPS literals in frontend code.
+- **Real Stripe Sandbox/Live Checkout & Live Transactional Emails (`STRIPE-01`, `EMAIL-01`)**:
+  - Updated `POST /api/orders/[code]/pay-card` to support creating real Stripe Checkout Sessions across all cart line items when `STRIPE_SECRET_KEY` is set, verifying return `session_id`s, and proxying signed webhooks at `POST /api/webhooks/stripe`, while retaining local test card fallback when keys are unset.
+  - Added `dispatchTransactionalEmail` in `web/lib/email-receipt.ts` supporting live HTML email delivery via `RESEND_API_KEY` or `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS` alongside the on-screen Email Preview modal.
+- **Self-Sufficient Product Photo & Lighting Modes (`MEDIA-01`)**:
+  - Cached all 8 opening-drop demo images locally under `web/public/demo-assets/` and updated product URLs to `/demo-assets/*`.
+  - Updated `LampStage` and `ProductStoryClient` so single-photo SKUs (`image_day_url` set, `image_lit_url` blank) render as clean plain images without artificial warm tinting or redundant 2700K tabs, while dual-photo SKUs retain their 5500K ↔ 2700K cross-fade and radial bloom.
+  - Added `art_variant = "none"` to disable the 1:10 CAD schematic tab for plain-photo or non-lamp items.
+- **De-branded Test & DB Identifiers (`NAME-01`)**:
+  - Replaced all remaining stale working-name identifiers in Rust tests and CI workflows with neutral `STOREFRONT_TEST_DATABASE_URL` / `storefront_scratch` / `ATELIER` naming.
+- **5-Stage Real-Browser UI/UX Verification (`QA-01`)**:
+  - Executed and archived 27 Desktop (`1440x900`) and Mobile (`390x844`) `.jpg` screenshots and `INDEX.md` in `artifacts/ui-audit/20261016__session-01a143c3-57df-76fa-8e6f-8dd98a6389f2/`.
+
+### Earlier v2 Clean-Room Baseline
 - **Clean-Room Guardrail & Architecture**: Wiped legacy `web/` from disk and Git history on orphan branch `v2-clean-room`, locked predecessor `webpage/web` via OS ACLs, and documented the pure backend contract in `API_CONTRACT.md`.
 - **Storefront Exhibition UI/UX**:
   - Sticky glassmorphic header with live Brand Wordmark, `Daylight 5500K` ↔ `Nocturne 2700K` room dimmer (`L` shortcut), route-preserving `EN / 繁體中文` switcher, and `Bag (N)` trigger.

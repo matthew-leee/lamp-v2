@@ -1,7 +1,7 @@
 import { interpolateCopy } from "./format.ts";
 import type { Locale } from "./i18n.ts";
 
-export type ArtVariant = "dome" | "shades" | "shades-tall" | "piano";
+export type ArtVariant = "dome" | "shades" | "shades-tall" | "piano" | "none";
 
 export interface ProductLocaleCopy {
   model_alt?: string;
@@ -67,6 +67,9 @@ export interface SiteConfig {
   currency: string;
   gaMeasurementId: string | null;
   gscVerification: string | null;
+  fpsId: string | null;
+  fpsAccountName: string | null;
+  fpsQrUrl: string | null;
 }
 
 export function getApiBaseUrl(): string {
@@ -124,6 +127,21 @@ export function resolveSiteConfig(overrides: SettingsMap): SiteConfig {
     "analytics.gsc_verification",
     process.env.NEXT_PUBLIC_GSC_VERIFICATION,
   );
+  const fpsId = resolveLayered(
+    overrides,
+    "payment.fps_id",
+    process.env.NEXT_PUBLIC_FPS_ID,
+  );
+  const fpsAccountName = resolveLayered(
+    overrides,
+    "payment.fps_account_name",
+    process.env.NEXT_PUBLIC_FPS_ACCOUNT_NAME,
+  );
+  const fpsQrUrl = resolveLayered(
+    overrides,
+    "payment.fps_qr_url",
+    process.env.NEXT_PUBLIC_FPS_QR_URL,
+  );
 
   return {
     brandName,
@@ -133,6 +151,9 @@ export function resolveSiteConfig(overrides: SettingsMap): SiteConfig {
     currency,
     gaMeasurementId,
     gscVerification,
+    fpsId,
+    fpsAccountName,
+    fpsQrUrl,
   };
 }
 

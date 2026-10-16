@@ -21,7 +21,7 @@
 //!   seed.
 //!
 //! The three DB-backed tests skip (loudly, via the shared helper) when
-//! `HVILE_TEST_DATABASE_URL` is unset, so plain `cargo test` stays green
+//! `STOREFRONT_TEST_DATABASE_URL` is unset, so plain `cargo test` stays green
 //! without a scratch server; `scratch_target_validation` never skips. Tests
 //! are plain `#[test]` fns driving the harness runtime through
 //! `ScratchDb::block_on` — see `common` for why (`Drop` cannot block a
@@ -31,14 +31,13 @@ mod common;
 
 use common::{assert_ambient_pg_env_clean, validate_scratch_target, ScratchDb};
 
-/// The verified public schema after 0001..0006 (sorted, `information_schema`
+/// The verified public schema after 0001..0007 (sorted, `information_schema`
 /// order). A new table is a deliberate migration-contract change: update this
-/// list consciously, never by making the test fuzzy. (0005 added COLUMNS to
-/// `products`, never a table, so it was unchanged by it; 0006 added the money
-/// path's `orders` + `payment_events`.)
+/// list consciously, never by making the test fuzzy.
 const EXPECTED_TABLES: &[&str] = &[
     "admin_users",
     "audit_log",
+    "order_items",
     "orders",
     "payment_events",
     "pieces",
@@ -79,6 +78,7 @@ struct SeedCounts {
     audit_log: i64,
     admin_users: i64,
     orders: i64,
+    order_items: i64,
     payment_events: i64,
 }
 
@@ -95,6 +95,7 @@ impl SeedCounts {
             audit_log: count(db, "audit_log"),
             admin_users: count(db, "admin_users"),
             orders: count(db, "orders"),
+            order_items: count(db, "order_items"),
             payment_events: count(db, "payment_events"),
         }
     }
@@ -125,6 +126,11 @@ impl SeedCounts {
         assert_eq!(
             self.orders, 0,
             "orders must stay empty after {phase} (runtime money-path rows: \
+             created only by real reservations, never by the seed)"
+        );
+        assert_eq!(
+            self.order_items, 0,
+            "order_items must stay empty after {phase} (runtime money-path rows: \
              created only by real reservations, never by the seed)"
         );
         assert_eq!(
@@ -233,7 +239,7 @@ fn scratch_target_validation() {
         "55432 refusal must name the shared verify DB: {verify_err}"
     );
     assert!(
-        verify_err.contains("hvile_scratch") && verify_err.contains("55433"),
+        verify_err.contains("storefront_scratch") && verify_err.contains("55433"),
         "55432 refusal must name the scratch recipe: {verify_err}"
     );
 }

@@ -54,10 +54,10 @@ html[data-atmosphere="night"] {
 }
 
 @theme inline {
-  --font-display: var(--font-fraunces), "Noto Serif TC", Georgia, serif;
-  --font-sans: var(--font-space-grotesk), "Noto Sans TC", system-ui, sans-serif;
-  --font-display-tc: var(--font-noto-serif-tc), var(--font-fraunces), serif;
-  --font-sans-tc: var(--font-noto-sans-tc), var(--font-space-grotesk), sans-serif;
+  --font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", "Noto Serif TC", "PMingLiU", Georgia, serif;
+  --font-sans: "Inter", "Helvetica Neue", "Noto Sans TC", "PingFang HK", "Microsoft JhengHei", system-ui, sans-serif;
+  --font-display-tc: "Noto Serif TC", "Iowan Old Style", "PMingLiU", Georgia, serif;
+  --font-sans-tc: "Noto Sans TC", "PingFang HK", "Microsoft JhengHei", system-ui, sans-serif;
 }
 
 html {
@@ -112,14 +112,14 @@ body {
   background:
     radial-gradient(
       circle at 50% 38%,
-      hsl(var(--art-hue, 38) 85% 64% / 0.38) 0%,
-      hsl(var(--art-hue, 38) 78% 58% / 0.16) 36%,
-      transparent 68%
+      hsl(var(--art-hue, 38) 88% 64% / 0.56) 0%,
+      hsl(var(--art-hue, 38) 80% 56% / 0.28) 38%,
+      transparent 72%
     ),
     radial-gradient(
       circle at 50% 74%,
-      color-mix(in srgb, var(--color-glow) 28%, transparent) 0%,
-      transparent 62%
+      color-mix(in srgb, var(--color-glow) 42%, transparent) 0%,
+      transparent 66%
     );
   transition: opacity 700ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -127,10 +127,10 @@ body {
 .warm-photo-cast {
   background: radial-gradient(
     circle at 50% 36%,
-    color-mix(in srgb, var(--color-glow) 32%, transparent) 0%,
-    transparent 74%
+    color-mix(in srgb, var(--color-glow) 45%, transparent) 0%,
+    transparent 76%
   );
-  mix-blend-mode: soft-light;
+  mix-blend-mode: screen;
   transition: opacity 700ms ease;
 }
 

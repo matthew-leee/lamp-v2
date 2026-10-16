@@ -6,7 +6,7 @@
 //! throwaway database on the D2c scratch Postgres server (port 55433) without
 //! ever touching the shared databases:
 //!
-//! * `scratch_db_url()` is the env gate (`HVILE_TEST_DATABASE_URL`). When the
+//! * `scratch_db_url()` is the env gate (`STOREFRONT_TEST_DATABASE_URL`). When the
 //!   variable is unset the DB tests skip, with one loud banner so the skip is
 //!   visible in plain `cargo test` output. When it IS set, the URL must pass
 //!   [`validate_scratch_target`]: a set-but-wrong target panics — it never
@@ -67,14 +67,14 @@ use tower::ServiceExt; // oneshot
 /// Env gate for every DB-backed test. Expected value shape:
 /// `postgres://<user>:<password>@localhost:55433/<database>` (the D2c scratch
 /// server). Unset means "skip DB tests", never "run against something else".
-pub const DATABASE_URL_ENV: &str = "HVILE_TEST_DATABASE_URL";
+pub const DATABASE_URL_ENV: &str = "STOREFRONT_TEST_DATABASE_URL";
 
 /// The storefront shared verify DB port. D2c tests create and DROP sibling
 /// databases on whatever server the URL points at, so pointing them at the
 /// shared verify DB would race the storefront's verification runs. Refused.
 const SHARED_VERIFY_DB_PORT: u16 = 55432;
 
-/// The D2c scratch server port (container `hvile-d2c-db`): the only sanctioned
+/// The D2c scratch server port: the only sanctioned
 /// target for these tests. The scratch recipe pins 55433 exactly; changing it
 /// is a deliberate, documented edit of THIS constant (and the recipe) — never
 /// something a stray URL or ambient configuration can renegotiate.
@@ -106,6 +106,7 @@ const MIGRATIONS: &[&str] = &[
     "0004_admin.sql",
     "0005_flagship_media_specs.sql",
     "0006_orders_reservations.sql",
+    "0007_multi_sku_fps_media.sql",
 ];
 
 /// Where the migration files live on disk, resolved at compile time so the
@@ -119,7 +120,7 @@ const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
 /// `cargo test` output that must show this skip.
 const SKIP_BANNER: &str = "\
 ================================================================================
- D2c DB TESTS SKIPPED: HVILE_TEST_DATABASE_URL is not set.
+ D2c DB TESTS SKIPPED: STOREFRONT_TEST_DATABASE_URL is not set.
  Expected value shape: postgres://<user>:<password>@localhost:55433/<database>
  (the D2c scratch Postgres on port 55433; port 55432 is the storefront shared
  verify DB and is refused by the harness endpoint allowlist, never raced by
@@ -188,7 +189,7 @@ pub fn validate_scratch_target(url: &str) -> Result<(), String> {
             "target is a Unix socket path, not the sanctioned scratch TCP \
              endpoint (expected host localhost/127.0.0.1/::1 port \
              {SCRATCH_DB_PORT}, e.g. \
-             postgres://hvile:scratch-only@localhost:{SCRATCH_DB_PORT}/hvile_scratch)"
+             postgres://storefront:scratch-only@localhost:{SCRATCH_DB_PORT}/storefront_scratch)"
         ));
     }
 
@@ -222,21 +223,21 @@ pub fn validate_scratch_target(url: &str) -> Result<(), String> {
              {SHARED_VERIFY_DB_PORT}); D2c tests create and DROP whole \
              databases and must never race the storefront's verification \
              runs. Use the D2c scratch server recipe instead: \
-             postgres://hvile:scratch-only@localhost:{SCRATCH_DB_PORT}/hvile_scratch"
+             postgres://storefront:scratch-only@localhost:{SCRATCH_DB_PORT}/storefront_scratch"
         ));
     }
     if !loopback {
         return Err(format!(
             "{target} is not the sanctioned D2c scratch endpoint (host must \
              be localhost/127.0.0.1/::1): use the scratch recipe \
-             postgres://hvile:scratch-only@localhost:{SCRATCH_DB_PORT}/hvile_scratch"
+             postgres://storefront:scratch-only@localhost:{SCRATCH_DB_PORT}/storefront_scratch"
         ));
     }
     if opts.get_port() != SCRATCH_DB_PORT {
         return Err(format!(
             "{target} is not the sanctioned D2c scratch endpoint (port must \
              be {SCRATCH_DB_PORT}): use the scratch recipe \
-             postgres://hvile:scratch-only@localhost:{SCRATCH_DB_PORT}/hvile_scratch"
+             postgres://storefront:scratch-only@localhost:{SCRATCH_DB_PORT}/storefront_scratch"
         ));
     }
     Ok(())
@@ -300,7 +301,7 @@ pub struct ScratchDb {
     /// Pool on the ephemeral database: this is what tests query.
     pool: PgPool,
     /// Maintenance pool, connected to the database named by the URL (the
-    /// scratch `hvile_scratch`): CREATE/DROP DATABASE are server-level
+    /// scratch `storefront_scratch`): CREATE/DROP DATABASE are server-level
     /// commands, so they run here and NEVER touch that database's own tables.
     admin_pool: PgPool,
     /// Private runtime that owns the connection tasks of both pools.

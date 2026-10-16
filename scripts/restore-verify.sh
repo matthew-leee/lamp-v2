@@ -22,7 +22,7 @@ TARGET_URL="${BASE_URL}/${SCRATCH_DB}"
 
 pg_restore --no-owner --no-privileges --dbname="${TARGET_URL}" "${DUMP_FILE}"
 
-# Verify all 10 authoritative schema tables exist after restore.
+# Verify all 11 authoritative schema tables exist after restore.
 for table in \
   products \
   product_content \
@@ -33,6 +33,7 @@ for table in \
   audit_log \
   admin_users \
   orders \
+  order_items \
   payment_events; do
   EXISTS="$(psql "${TARGET_URL}" -tAc "SELECT to_regclass('public.${table}') IS NOT NULL;")"
   if [ "${EXISTS}" != "t" ]; then
@@ -48,4 +49,4 @@ if [ "${VIOLATIONS}" != "0" ]; then
   exit 1
 fi
 
-echo "Restore verification passed on ${SCRATCH_DB} (10 tables + STOCK-01 invariant verified)."
+echo "Restore verification passed on ${SCRATCH_DB} (11 tables + STOCK-01 invariant verified)."

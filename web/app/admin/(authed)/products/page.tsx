@@ -273,6 +273,7 @@ export default async function AdminProductsPage({
               <option value="shades">shades</option>
               <option value="shades-tall">shades-tall</option>
               <option value="piano">piano</option>
+              <option value="none">none (plain photo / no CAD schematic)</option>
             </select>
           </div>
           <div>

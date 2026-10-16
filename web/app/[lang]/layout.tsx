@@ -1,12 +1,7 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { notFound } from "next/navigation";
-import {
-  Fraunces,
-  Noto_Sans_TC,
-  Noto_Serif_TC,
-  Space_Grotesk,
-} from "next/font/google";
 import { loadStorefrontData, readSiteCopy } from "@/lib/api";
 import { htmlLang, isLocale, type Locale } from "@/lib/i18n";
 import { StorefrontProvider } from "@/components/storefront-context";
@@ -15,30 +10,6 @@ import BagDrawer from "@/components/bag-drawer";
 import "../globals.css";
 
 export const dynamic = "force-dynamic";
-
-const fraunces = Fraunces({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-fraunces",
-});
-
-const spaceGrotesk = Space_Grotesk({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-space-grotesk",
-});
-
-const notoSerifTC = Noto_Serif_TC({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-noto-serif-tc",
-});
-
-const notoSansTC = Noto_Sans_TC({
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-noto-sans-tc",
-});
 
 export async function generateMetadata({
   params,
@@ -111,12 +82,6 @@ export default async function LocaleLayout({
       lang={htmlLang[locale]}
       data-atmosphere="night"
       suppressHydrationWarning
-      className={[
-        fraunces.variable,
-        spaceGrotesk.variable,
-        notoSerifTC.variable,
-        notoSansTC.variable,
-      ].join(" ")}
     >
       <body className="min-h-dvh font-sans antialiased">
         <StorefrontProvider
@@ -145,12 +110,18 @@ export default async function LocaleLayout({
                 </p>
               </div>
               <div className="flex flex-wrap gap-6 text-xs tracking-[0.16em] uppercase text-[var(--text-secondary)]">
-                <a href={`/${locale}/orders`} className="hover:text-[var(--text-primary)]">
+                <Link href={`/${locale}/orders`} className="hover:text-[var(--text-primary)]">
                   {locale === "zh-HK" ? "訂單查詢" : "Order Lookup"}
-                </a>
-                <a href="/admin" className="hover:text-[var(--text-primary)]">
-                  Studio Admin
-                </a>
+                </Link>
+                {locale === "zh-HK" ? (
+                  <Link href="/admin" className="hover:text-[var(--text-primary)]">
+                    後台管理
+                  </Link>
+                ) : (
+                  <Link href="/admin" className="hover:text-[var(--text-primary)]">
+                    Studio Admin
+                  </Link>
+                )}
               </div>
             </div>
           </footer>

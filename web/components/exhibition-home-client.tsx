@@ -208,17 +208,19 @@ export default function ExhibitionHomeClient({
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setHeroStageMode((m) => (m === "photo" ? "scale" : "photo"))
-                    }
-                    className="border border-[var(--border-hairline)] px-3 py-1.5 text-[11px] tracking-[0.14em] uppercase text-[var(--text-secondary)] hover:border-[var(--color-glow)] hover:text-[var(--text-primary)]"
-                  >
-                    {heroStageMode === "photo"
-                      ? t(ui.stageModeScale, lang)
-                      : t(ui.stageModeDay, lang)}
-                  </button>
+                  {heroProduct.art_variant !== "none" && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setHeroStageMode((m) => (m === "photo" ? "scale" : "photo"))
+                      }
+                      className="border border-[var(--border-hairline)] px-3 py-1.5 text-[11px] tracking-[0.14em] uppercase text-[var(--text-secondary)] hover:border-[var(--color-glow)] hover:text-[var(--text-primary)]"
+                    >
+                      {heroStageMode === "photo"
+                        ? t(ui.stageModeScale, lang)
+                        : t(ui.stageModeDay, lang)}
+                    </button>
+                  )}
                   <Link
                     href={`/${lang}/products/${heroProduct.slug}`}
                     className="border border-[var(--border-strong)] bg-[var(--text-primary)] px-3.5 py-1.5 text-[11px] tracking-[0.14em] uppercase text-[var(--surface-page)]"
@@ -301,6 +303,7 @@ export default function ExhibitionHomeClient({
                     imageDayUrl={activeMatrixEntry.product.image_day_url}
                     imageLitUrl={activeMatrixEntry.product.image_lit_url}
                     aspectClass="aspect-square"
+                    compact
                   />
                 </div>
                 <div>
@@ -385,20 +388,30 @@ export default function ExhibitionHomeClient({
               >
                 {t(ui.filterAll, lang)} ({products.length})
               </button>
-              {families.map((fam) => (
-                <button
-                  key={fam}
-                  type="button"
-                  onClick={() => setFamilyFilter(fam)}
-                  className={`border px-3 py-1.5 text-xs tracking-[0.12em] uppercase transition-colors ${
-                    familyFilter === fam
-                      ? "border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--surface-page)]"
-                      : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                  }`}
-                >
-                  {fam.replace(/-/g, " ")}
-                </button>
-              ))}
+              {families.map((fam) => {
+                const label =
+                  lang === "zh-HK"
+                    ? fam === "panthella-160-portable"
+                      ? "Panthella 160 便攜系列"
+                      : fam === "ph-table"
+                        ? "PH 檯燈系列"
+                        : fam.replace(/-/g, " ")
+                    : fam.replace(/-/g, " ");
+                return (
+                  <button
+                    key={fam}
+                    type="button"
+                    onClick={() => setFamilyFilter(fam)}
+                    className={`border px-3 py-1.5 text-xs tracking-[0.12em] uppercase transition-colors ${
+                      familyFilter === fam
+                        ? "border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--surface-page)]"
+                        : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Grid vs Archival Index Toggle */}

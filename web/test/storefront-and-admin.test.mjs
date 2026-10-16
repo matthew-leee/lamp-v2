@@ -15,6 +15,7 @@ import {
   parseDollarsToCents,
 } from "../lib/format.ts";
 import { resolveSiteConfig } from "../lib/api.ts";
+import { buildOrderEmailHtml, escapeHtml } from "../lib/email-receipt.ts";
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -50,7 +51,42 @@ test("white-label static scan: zero hardcoded brand or maker literals in web/{ap
       /\bHVILE\b|\bHAVN\b|\bLYSIE\b/i,
       `${rel} must not hardcode brand names`,
     );
+    assert.doesNotMatch(
+      code,
+      /10849201/,
+      `${rel} must not hardcode FPS merchant ID (FPS-01)`,
+    );
   }
+});
+
+test("CART-01 terminology: UI uses Shopping Cart / Cart (購物車) and never Bag", () => {
+  const i18nSource = fs.readFileSync(path.join(webRoot, "lib/i18n.ts"), "utf8");
+  assert.match(i18nSource, /Shopping Cart/);
+  assert.match(i18nSource, /Add to Cart/);
+  assert.match(i18nSource, /購物車/);
+  assert.match(i18nSource, /加入購物車/);
+  assert.doesNotMatch(i18nSource, /Add to Bag|Collector's Bag|購物袋/);
+});
+
+test("resolveSiteConfig: presence-wins settings overrides including FPS-01 keys", () => {
+  const config = resolveSiteConfig({
+    "brand.name": "KRONOS",
+    "brand.name_native": "克羅諾斯",
+    "site.url": "https://kronos.example",
+    currency: "EUR",
+    "contact.whatsapp": "",
+    "payment.fps_id": "99887766",
+    "payment.fps_account_name": "KRONOS HK LTD",
+    "payment.fps_qr_url": "/uploads/fps-qr.png",
+  });
+  assert.equal(config.brandName, "KRONOS");
+  assert.equal(config.brandNameNative, "克羅諾斯");
+  assert.equal(config.siteUrl, "https://kronos.example");
+  assert.equal(config.currency, "EUR");
+  assert.equal(config.whatsappNumber, null);
+  assert.equal(config.fpsId, "99887766");
+  assert.equal(config.fpsAccountName, "KRONOS HK LTD");
+  assert.equal(config.fpsQrUrl, "/uploads/fps-qr.png");
 });
 
 test("formatEditionBadge: crash-proof when a newly created product has 0 pieces", () => {
@@ -85,12 +121,14 @@ test("resolveSiteConfig: presence-wins settings overrides and white-label swap",
     "site.url": "https://kronos.example",
     currency: "EUR",
     "contact.whatsapp": "",
+    "payment.fps_id": "",
   });
   assert.equal(config.brandName, "KRONOS");
   assert.equal(config.brandNameNative, "克羅諾斯");
   assert.equal(config.siteUrl, "https://kronos.example");
   assert.equal(config.currency, "EUR");
   assert.equal(config.whatsappNumber, null);
+  assert.equal(config.fpsId, null);
 });
 
 test("formatProductTitle & interpolateCopy & buildWhatsAppUrl", () => {
@@ -111,4 +149,29 @@ test("formatProductTitle & interpolateCopy & buildWhatsAppUrl", () => {
     "https://wa.me/85291234567?text=Hello%20LYSIE",
   );
   assert.equal(buildWhatsAppUrl("", "Hello"), null);
+});
+
+test("buildOrderEmailHtml: escapes XSS in customer fields and localizes zh-HK status (EMAIL-01, LANG-01)", () => {
+  assert.equal(escapeHtml('<img src=x onerror="alert(1)">'), "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  const receipt = buildOrderEmailHtml({
+    orderCode: "ORD-100",
+    status: "paid",
+    paymentMethod: "fps",
+    productTitle: "Panthella 160",
+    productSlug: "panthella-160-v3-beige",
+    quantity: 2,
+    unitPriceCents: 161500,
+    totalCents: 323000,
+    currency: "HKD",
+    fpsReference: '<script>alert("xss")</script>',
+    expiresAt: "2026-10-16T12:00:00Z",
+    createdAt: "2026-10-16T10:00:00Z",
+    brandName: "ATELIER",
+    siteUrl: "https://shop.example.com",
+    locale: "zh-HK",
+  });
+  assert.doesNotMatch(receipt.html, /<script>/i);
+  assert.match(receipt.html, /&lt;script&gt;alert\(&quot;xss&quot;\)&lt;\/script&gt;/);
+  assert.match(receipt.html, /已付款 · 訂單已確認/);
+  assert.match(receipt.html, /香港轉數快 \(FPS\)/);
 });

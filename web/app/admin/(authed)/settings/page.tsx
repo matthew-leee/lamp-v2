@@ -50,6 +50,24 @@ const SETTING_DEFS: readonly SettingDef[] = [
     envVar: "NEXT_PUBLIC_WHATSAPP_NUMBER",
   },
   {
+    key: "payment.fps_id",
+    label: "Hong Kong FPS Merchant ID / Proxy",
+    hint: "FPS Identifier, mobile number, or email displayed on HK FPS checkout instructions. Toggle OFF to clear.",
+    envVar: "NEXT_PUBLIC_FPS_ID",
+  },
+  {
+    key: "payment.fps_account_name",
+    label: "Hong Kong FPS Account Name",
+    hint: "Beneficiary account name displayed on HK FPS checkout instructions (defaults to Brand Name when unset).",
+    envVar: "NEXT_PUBLIC_FPS_ACCOUNT_NAME",
+  },
+  {
+    key: "payment.fps_qr_url",
+    label: "Hong Kong FPS QR Code Image URL",
+    hint: "Optional FPS QR Code image URL (or /uploads/... path) rendered on FPS checkout instructions.",
+    envVar: "NEXT_PUBLIC_FPS_QR_URL",
+  },
+  {
     key: "analytics.ga_measurement_id",
     label: "Google Analytics 4 ID",
     hint: "GA4 Measurement ID (e.g. G-XXXXXXXXXX). Toggle OFF to disable analytics.",

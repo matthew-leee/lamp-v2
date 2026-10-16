@@ -55,6 +55,7 @@ const ART_VARIANTS: readonly ArtVariant[] = [
   "shades",
   "shades-tall",
   "piano",
+  "none",
 ] as const;
 
 export default function AdminProductStudioClient({

@@ -451,8 +451,10 @@ fn validate_price_cents(price_cents: i64) -> Result<(), &'static str> {
 
 fn validate_art_variant(art_variant: &str) -> Result<(), &'static str> {
     match art_variant {
-        "dome" | "shades" | "shades-tall" | "piano" => Ok(()),
-        _ => Err("art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\""),
+        "dome" | "shades" | "shades-tall" | "piano" | "none" => Ok(()),
+        _ => Err(
+            "art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\", \"none\"",
+        ),
     }
 }
 
@@ -2293,7 +2295,7 @@ mod tests {
 
     #[test]
     fn validate_setting_keeps_required_fields_non_empty() {
-        assert_eq!(validate_setting("brand.name", "HVILE"), Ok(()));
+        assert_eq!(validate_setting("brand.name", "ATELIER"), Ok(()));
         assert_eq!(
             validate_setting("brand.name", ""),
             Err("brand.name cannot be empty")
@@ -2392,11 +2394,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_art_variant_accepts_the_four_silhouettes() {
+    fn validate_art_variant_accepts_the_five_variants() {
         assert_eq!(validate_art_variant("dome"), Ok(()));
         assert_eq!(validate_art_variant("shades"), Ok(()));
         assert_eq!(validate_art_variant("shades-tall"), Ok(()));
         assert_eq!(validate_art_variant("piano"), Ok(()));
+        assert_eq!(validate_art_variant("none"), Ok(()));
     }
 
     #[test]
@@ -2410,10 +2413,11 @@ mod tests {
             "shadestall",
             "shades tall",
             "Piano",
+            "None",
         ] {
             assert_eq!(
                 validate_art_variant(variant),
-                Err("art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\""),
+                Err("art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\", \"none\""),
                 "{variant}"
             );
         }
@@ -2658,7 +2662,7 @@ mod tests {
         bad.art_variant = "shadestall".to_string();
         assert_eq!(
             validate_product_full(&bad, &locales()),
-            Err("art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\"")
+            Err("art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\", \"none\"")
         );
 
         let mut bad = full_input();

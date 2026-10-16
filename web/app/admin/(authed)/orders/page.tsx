@@ -6,6 +6,14 @@ import { formatMoney } from "@/lib/format";
 export const metadata: Metadata = { title: "Orders & Quarantine" };
 export const dynamic = "force-dynamic";
 
+interface AdminOrderItemRow {
+  product_id: number;
+  product_slug: string;
+  quantity: number;
+  unit_price_cents: number;
+  line_total_cents: number;
+}
+
 interface AdminOrderRow {
   id: number;
   order_code: string;
@@ -24,6 +32,7 @@ interface AdminOrderRow {
   fps_reference: string;
   expires_at: string;
   created_at: string;
+  items?: AdminOrderItemRow[];
 }
 
 export default async function AdminOrdersPage({
@@ -145,7 +154,19 @@ export default async function AdminOrdersPage({
                     </div>
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">
-                    {row.product_slug} × {row.quantity}
+                    {row.items && row.items.length > 0 ? (
+                      <div className="space-y-1">
+                        {row.items.map((it) => (
+                          <div key={it.product_slug}>
+                            {it.product_slug} × {it.quantity}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span>
+                        {row.product_slug} × {row.quantity}
+                      </span>
+                    )}
                   </td>
                   <td className="tabular-nums px-4 py-3 font-medium">
                     {formatMoney(row.total_cents, row.currency)}

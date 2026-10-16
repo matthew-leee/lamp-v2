@@ -46,8 +46,7 @@ const STOCK_INVARIANT_400: &str =
     r#"{"error":"stock_total must be >= stock_reserved + stock_quarantined"}"#;
 
 /// The exact 400 body of a rejected `art_variant` (the handler's contract).
-const ART_VARIANT_400: &str =
-    r#"{"error":"art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\""}"#;
+const ART_VARIANT_400: &str = r#"{"error":"art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\", \"none\""}"#;
 
 /// Drives one admin request on the harness runtime (cookie + CSRF header
 /// included by `admin_request`), returning (status, body).
@@ -178,7 +177,7 @@ fn get_product_full_returns_the_complete_aggregate() {
     // The 0005 media/spec columns and the quarantine count travel verbatim.
     assert_eq!(
         aggregate["image_day_url"],
-        "https://cdn.shopify.com/s/files/1/0913/3370/files/Opal-Beige.png"
+        "/demo-assets/panthella-160-v3-beige.png"
     );
     assert_eq!(aggregate["designer"], "Verner Panton");
     assert_eq!(aggregate["design_year"], "1971");

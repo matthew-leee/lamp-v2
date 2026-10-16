@@ -81,18 +81,18 @@ export default function ExhibitionHeader({
           </nav>
         </div>
 
-        {/* Right: Global Room Dimmer + Language Switcher + Collector's Bag */}
-        <div className="flex items-center gap-3 sm:gap-5">
+        {/* Right: Global Room Dimmer + Language Switcher + Shopping Cart */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-4">
           {/* Interactive Room Dimmer Switch */}
           <button
             type="button"
             onClick={toggleLit}
             aria-pressed={lit}
             aria-label={lit ? t(ui.atmosphereNight, lang) : t(ui.atmosphereDay, lang)}
-            className="group flex items-center gap-2.5 border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3.5 py-2 text-xs tracking-[0.14em] uppercase text-[var(--text-primary)] transition-all hover:border-[var(--color-glow)]"
+            className="group flex shrink-0 items-center gap-2 whitespace-nowrap border border-[var(--border-hairline)] bg-[var(--surface-card)] px-2.5 py-1.5 text-[11px] tracking-[0.12em] uppercase text-[var(--text-primary)] transition-all hover:border-[var(--color-glow)] sm:px-3.5 sm:py-2 sm:text-xs sm:tracking-[0.14em]"
           >
             <span
-              className={`inline-block size-2.5 rounded-full transition-all duration-500 ${
+              className={`inline-block size-2 rounded-full transition-all duration-500 sm:size-2.5 ${
                 lit
                   ? "bg-[var(--color-glow)] shadow-[0_0_10px_var(--color-glow)]"
                   : "border border-[var(--text-secondary)] bg-transparent"
@@ -109,7 +109,7 @@ export default function ExhibitionHeader({
           {/* Route-Preserving Language Switcher */}
           <nav
             aria-label={lang === "zh-HK" ? "語言" : "Language"}
-            className="flex items-center border border-[var(--border-hairline)] bg-[var(--surface-card)] text-xs"
+            className="flex shrink-0 items-center whitespace-nowrap border border-[var(--border-hairline)] bg-[var(--surface-card)] text-[11px] sm:text-xs"
           >
             {locales.map((targetLocale) => {
               const active = targetLocale === lang;
@@ -119,7 +119,7 @@ export default function ExhibitionHeader({
                   href={`/${targetLocale}${suffix}`}
                   lang={htmlLang[targetLocale]}
                   aria-current={active ? "true" : undefined}
-                  className={`px-2.5 py-2 tracking-[0.1em] transition-colors ${
+                  className={`whitespace-nowrap px-2 py-1.5 tracking-[0.08em] transition-colors sm:px-2.5 sm:py-2 sm:tracking-[0.1em] ${
                     active
                       ? "bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
                       : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -131,12 +131,12 @@ export default function ExhibitionHeader({
             })}
           </nav>
 
-          {/* Collector's Bag Drawer Trigger */}
+          {/* Shopping Cart Drawer Trigger */}
           <button
             type="button"
             onClick={() => setBagOpen(true)}
             aria-label={`${t(ui.navBag, lang)} (${totalBagUnits})`}
-            className="flex items-center gap-2 border border-[var(--border-strong)] bg-[var(--text-primary)] px-4 py-2 text-xs tracking-[0.16em] uppercase text-[var(--surface-page)] transition-opacity hover:opacity-90"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap border border-[var(--border-strong)] bg-[var(--text-primary)] px-3 py-1.5 text-[11px] tracking-[0.12em] uppercase text-[var(--surface-page)] transition-opacity hover:opacity-90 sm:gap-2 sm:px-4 sm:py-2 sm:text-xs sm:tracking-[0.16em]"
           >
             <span>{t(ui.navBag, lang)}</span>
             <span className="tabular-nums inline-flex min-w-5 items-center justify-center rounded-full bg-[var(--color-glow)] px-1.5 py-0.5 text-[11px] font-semibold text-[#11100e]">

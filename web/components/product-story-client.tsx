@@ -163,53 +163,71 @@ export default function ProductStoryClient({
               altText={title}
             />
 
-            {/* 3-Mode Light Studio Switcher */}
-            <div className="mt-4 grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setStageMode("photo");
-                  setLit(false);
-                }}
-                aria-pressed={stageMode === "photo" && !lit}
-                className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
-                  stageMode === "photo" && !lit
-                    ? "border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
-                    : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                {t(ui.stageModeDay, lang)}
-              </button>
+            {/* Light Studio Switcher (hides 2700K when single-photo only, hides Scale when art_variant === "none") */}
+            {(() => {
+              const hasLitPhoto =
+                product.image_lit_url.trim() !== "" ||
+                (product.image_day_url.trim() === "" &&
+                  product.art_variant !== "none");
+              const hasScaleTab = product.art_variant !== "none";
+              if (!hasLitPhoto && !hasScaleTab) return null;
+              return (
+                <div
+                  className={`mt-4 grid gap-2 ${
+                    hasLitPhoto && hasScaleTab ? "grid-cols-3" : "grid-cols-2"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStageMode("photo");
+                      setLit(false);
+                    }}
+                    aria-pressed={stageMode === "photo" && (!lit || !hasLitPhoto)}
+                    className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
+                      stageMode === "photo" && (!lit || !hasLitPhoto)
+                        ? "border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
+                        : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    {t(ui.stageModeDay, lang)}
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setStageMode("photo");
-                  setLit(true);
-                }}
-                aria-pressed={stageMode === "photo" && lit}
-                className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
-                  stageMode === "photo" && lit
-                    ? "border-[var(--color-glow)] bg-[var(--color-glow)] text-[#11100e] font-semibold"
-                    : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                {t(ui.stageModeNight, lang)}
-              </button>
+                  {hasLitPhoto && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStageMode("photo");
+                        setLit(true);
+                      }}
+                      aria-pressed={stageMode === "photo" && lit}
+                      className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
+                        stageMode === "photo" && lit
+                          ? "border-[var(--color-glow)] bg-[var(--color-glow)] text-[#11100e] font-semibold"
+                          : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                      }`}
+                    >
+                      {t(ui.stageModeNight, lang)}
+                    </button>
+                  )}
 
-              <button
-                type="button"
-                onClick={() => setStageMode("scale")}
-                aria-pressed={stageMode === "scale"}
-                className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
-                  stageMode === "scale"
-                    ? "border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
-                    : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                {t(ui.stageModeScale, lang)}
-              </button>
-            </div>
+                  {hasScaleTab && (
+                    <button
+                      type="button"
+                      onClick={() => setStageMode("scale")}
+                      aria-pressed={stageMode === "scale"}
+                      className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
+                        stageMode === "scale"
+                          ? "border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
+                          : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                      }`}
+                    >
+                      {t(ui.stageModeScale, lang)}
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
 
@@ -266,31 +284,43 @@ export default function ProductStoryClient({
                 {t(ui.colourwaysHeading, lang)} ({siblings.length})
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
-                {siblings.map((sib) => {
-                  const sibCopy = sib.content[lang] ?? sib.content.en ?? {};
-                  const sibColour = sibCopy.colourway || sib.model;
-                  const isCurrent = sib.slug === product.slug;
-                  return (
-                    <Link
-                      key={sib.slug}
-                      href={`/${lang}/products/${sib.slug}`}
-                      aria-current={isCurrent ? "page" : undefined}
-                      className={`flex items-center gap-2 border px-3 py-2 text-xs transition-all ${
-                        isCurrent
-                          ? "border-[var(--color-glow)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
-                          : "border-[var(--border-hairline)] bg-[var(--surface-card)] text-[var(--text-primary)] hover:border-[var(--color-glow)]"
-                      }`}
-                    >
-                      <span
-                        className="inline-block size-2.5 rounded-full border border-black/20"
-                        style={{
-                          backgroundColor: `hsl(${sib.art_hue} 65% 65%)`,
-                        }}
-                      />
-                      <span>{sibColour}</span>
-                    </Link>
+                {(() => {
+                  const allSameModel = siblings.every(
+                    (s) => s.model === product.model,
                   );
-                })}
+                  return siblings.map((sib) => {
+                    const sibCopy = sib.content[lang] ?? sib.content.en ?? {};
+                    const sibLabel = allSameModel
+                      ? sibCopy.colourway || sib.model
+                      : formatProductTitle(
+                          sib.model,
+                          sibCopy.model_alt,
+                          sibCopy.colourway,
+                          lang,
+                        );
+                    const isCurrent = sib.slug === product.slug;
+                    return (
+                      <Link
+                        key={sib.slug}
+                        href={`/${lang}/products/${sib.slug}`}
+                        aria-current={isCurrent ? "page" : undefined}
+                        className={`flex items-center gap-2 border px-3 py-2 text-xs transition-all ${
+                          isCurrent
+                            ? "border-[var(--color-glow)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
+                            : "border-[var(--border-hairline)] bg-[var(--surface-card)] text-[var(--text-primary)] hover:border-[var(--color-glow)]"
+                        }`}
+                      >
+                        <span
+                          className="inline-block size-2.5 rounded-full border border-black/20"
+                          style={{
+                            backgroundColor: `hsl(${sib.art_hue} 65% 65%)`,
+                          }}
+                        />
+                        <span>{sibLabel}</span>
+                      </Link>
+                    );
+                  });
+                })()}
               </div>
             </div>
           )}

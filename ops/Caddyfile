@@ -13,6 +13,6 @@
     # All customer storefront and admin studio routes go to the Next.js server,
     # which relays admin and availability requests over the private Docker network.
     handle {
-        reverse_proxy web:3000
+        reverse_proxy web:3002
     }
 }

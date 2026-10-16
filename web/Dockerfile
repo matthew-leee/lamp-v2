@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
+RUN mkdir -p public/uploads public/demo-assets
 ARG NEXT_PUBLIC_BRAND_NAME
 ARG NEXT_PUBLIC_BRAND_NAME_NATIVE
 ARG NEXT_PUBLIC_SITE_URL
@@ -24,6 +25,7 @@ ENV NODE_ENV=production
 COPY --from=builder --chown=node:node /app/package.json ./
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/.next ./.next
+COPY --from=builder --chown=node:node /app/public ./public
 USER node
-EXPOSE 3000
+EXPOSE 3002
 CMD ["npm", "run", "start"]

@@ -78,14 +78,37 @@ pub const MAX_ORDER_QUANTITY: i32 = 16;
 // Request / response shapes
 // ---------------------------------------------------------------------------
 
-/// `POST /api/orders/reserve` body. `quantity`, `customer_phone` and
-/// `delivery_address` may be omitted (defaults below). No price field exists
-/// here on purpose — see the module docs: money comes from the DB.
-#[derive(Debug, Deserialize)]
-pub struct CreateReservationRequest {
+/// One requested line item in a multi-SKU reservation (`CART-01`).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReservationItemInput {
     pub slug: String,
     #[serde(default = "default_quantity")]
     pub quantity: i32,
+}
+
+/// One resolved line item on an order (`CART-01`).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, PartialEq, Eq)]
+pub struct OrderItem {
+    pub product_id: i64,
+    pub product_slug: String,
+    pub quantity: i32,
+    pub unit_price_cents: i64,
+    pub line_total_cents: i64,
+}
+
+/// `POST /api/orders/reserve` body. Supports both single-SKU (`slug` +
+/// `quantity`) and multi-SKU Shopping Cart (`items: [{ slug, quantity }]`)
+/// requests (`CART-01`). `quantity`, `customer_phone` and `delivery_address`
+/// may be omitted (defaults below). No price field exists here on purpose —
+/// see the module docs: money comes from the DB.
+#[derive(Debug, Deserialize)]
+pub struct CreateReservationRequest {
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default = "default_quantity")]
+    pub quantity: i32,
+    #[serde(default)]
+    pub items: Vec<ReservationItemInput>,
     pub payment_method: String,
     pub customer_name: String,
     pub customer_email: String,
@@ -99,7 +122,8 @@ fn default_quantity() -> i32 {
     1
 }
 
-/// `POST /api/orders/reserve` response — the created reservation.
+/// `POST /api/orders/reserve` response — the created reservation, including
+/// all line items (`items`).
 #[derive(Debug, Serialize)]
 pub struct OrderResponse {
     pub id: i64,
@@ -116,11 +140,12 @@ pub struct OrderResponse {
     pub customer_email: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    pub items: Vec<OrderItem>,
 }
 
 /// `GET /api/orders/{order_code}` response — the PUBLIC order status: no
-/// customer PII, no product id, just what a buyer needs to see.
-#[derive(Debug, Serialize, FromRow)]
+/// customer PII, just what a buyer needs to see, including all line items.
+#[derive(Debug, Serialize)]
 pub struct PublicOrderStatus {
     pub order_code: String,
     pub product_slug: String,
@@ -133,11 +158,28 @@ pub struct PublicOrderStatus {
     pub fps_reference: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    pub items: Vec<OrderItem>,
+}
+
+#[derive(Debug, FromRow)]
+struct PublicOrderStatusRow {
+    id: i64,
+    order_code: String,
+    product_slug: String,
+    quantity: i32,
+    unit_price_cents: i64,
+    total_cents: i64,
+    currency: String,
+    payment_method: String,
+    status: String,
+    fps_reference: String,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
 }
 
 /// One `orders` row as the admin console sees it (full row, incl. the
-/// contact/delivery fields — admin-only data behind `require_admin`).
-#[derive(Debug, Serialize, FromRow)]
+/// contact/delivery fields and `items` — admin-only data behind `require_admin`).
+#[derive(Debug, Serialize)]
 pub struct AdminOrder {
     pub id: i64,
     pub order_code: String,
@@ -157,6 +199,29 @@ pub struct AdminOrder {
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub items: Vec<OrderItem>,
+}
+
+#[derive(Debug, FromRow)]
+struct AdminOrderRow {
+    id: i64,
+    order_code: String,
+    product_id: i64,
+    product_slug: String,
+    quantity: i32,
+    unit_price_cents: i64,
+    total_cents: i64,
+    currency: String,
+    payment_method: String,
+    status: String,
+    customer_name: String,
+    customer_email: String,
+    customer_phone: String,
+    delivery_address: String,
+    fps_reference: String,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 /// `POST /api/webhooks/stripe` normalized payload, extracted from either
@@ -176,7 +241,10 @@ pub struct StripeWebhookPayload {
 pub fn is_settled_stripe_event_type(event_type: &str) -> bool {
     matches!(
         event_type,
-        "payment_intent.succeeded" | "checkout.session.completed" | "charge.succeeded"
+        "payment_intent.succeeded"
+            | "checkout.session.completed"
+            | "checkout.session.async_payment_succeeded"
+            | "charge.succeeded"
     )
 }
 
@@ -188,8 +256,15 @@ fn decode_stripe_payload(raw_body: &[u8]) -> Option<StripeWebhookPayload> {
     }
     let v: serde_json::Value = serde_json::from_slice(raw_body).ok()?;
     let event_id = v.get("id")?.as_str()?.to_string();
-    let event_type = v.get("type")?.as_str()?.to_string();
+    let mut event_type = v.get("type")?.as_str()?.to_string();
     let obj = v.get("data")?.get("object")?;
+    if event_type == "checkout.session.completed" {
+        if let Some(payment_status) = obj.get("payment_status").and_then(|s| s.as_str()) {
+            if !payment_status.eq_ignore_ascii_case("paid") {
+                event_type = "checkout.session.unpaid".to_string();
+            }
+        }
+    }
     let order_code = obj
         .get("metadata")
         .and_then(|m| m.get("order_code"))
@@ -271,20 +346,62 @@ fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
 // Validation (pure: no clock, no env, no DB)
 // ---------------------------------------------------------------------------
 
+/// Normalizes [`CreateReservationRequest`] into a non-empty list of
+/// `(slug, quantity)` line items, merging any duplicate slugs while
+/// preserving first-seen order (`CART-01`).
+pub fn normalized_reservation_items(
+    req: &CreateReservationRequest,
+) -> Result<Vec<ReservationItemInput>, String> {
+    let raw_items: Vec<ReservationItemInput> = if !req.items.is_empty() {
+        req.items.clone()
+    } else {
+        vec![ReservationItemInput {
+            slug: req.slug.clone(),
+            quantity: req.quantity,
+        }]
+    };
+
+    let mut merged: Vec<ReservationItemInput> = Vec::with_capacity(raw_items.len());
+    for item in raw_items {
+        let trimmed = item.slug.trim();
+        if trimmed.is_empty() {
+            return Err("slug is required".to_string());
+        }
+        reject_nul("slug", &item.slug)?;
+        if !(1..=MAX_ORDER_QUANTITY).contains(&item.quantity) {
+            return Err(format!(
+                "quantity must be between 1 and {MAX_ORDER_QUANTITY}"
+            ));
+        }
+        if let Some(existing) = merged.iter_mut().find(|i| i.slug == trimmed) {
+            let sum = existing
+                .quantity
+                .checked_add(item.quantity)
+                .ok_or_else(|| format!("quantity must be between 1 and {MAX_ORDER_QUANTITY}"))?;
+            if !(1..=MAX_ORDER_QUANTITY).contains(&sum) {
+                return Err(format!(
+                    "quantity must be between 1 and {MAX_ORDER_QUANTITY}"
+                ));
+            }
+            existing.quantity = sum;
+        } else {
+            merged.push(ReservationItemInput {
+                slug: trimmed.to_string(),
+                quantity: item.quantity,
+            });
+        }
+    }
+    if merged.is_empty() {
+        return Err("slug is required".to_string());
+    }
+    Ok(merged)
+}
+
 /// Field rules for [`CreateReservationRequest`]. Every text field is NUL-free
 /// (Postgres TEXT cannot hold a NUL; a 503 from the DB would be the wrong
 /// answer to a client mistake) and the required ones are non-empty.
 pub fn validate_reservation(req: &CreateReservationRequest) -> Result<(), String> {
-    let slug = req.slug.trim();
-    if slug.is_empty() {
-        return Err("slug is required".to_string());
-    }
-    reject_nul("slug", &req.slug)?;
-    if !(1..=MAX_ORDER_QUANTITY).contains(&req.quantity) {
-        return Err(format!(
-            "quantity must be between 1 and {MAX_ORDER_QUANTITY}"
-        ));
-    }
+    normalized_reservation_items(req)?;
     if !matches!(req.payment_method.as_str(), "card" | "fps") {
         return Err("payment_method must be \"card\" or \"fps\"".to_string());
     }
@@ -571,6 +688,38 @@ fn parse_signed_webhook(
 // Shared DB helpers (all inside the caller's transaction)
 // ---------------------------------------------------------------------------
 
+/// Loads the line items for one order (`order_items` table, falling back to
+/// the single-item columns on `orders` if `order_items` is empty).
+async fn load_order_items_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: i64,
+    fallback_product_id: i64,
+    fallback_slug: &str,
+    fallback_qty: i32,
+    fallback_unit_cents: i64,
+    fallback_total_cents: i64,
+) -> Result<Vec<OrderItem>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, OrderItem>(
+        "SELECT product_id, product_slug, quantity, unit_price_cents, line_total_cents \
+         FROM order_items WHERE order_id = $1 ORDER BY product_slug ASC, id ASC",
+    )
+    .bind(order_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    if !rows.is_empty() {
+        return Ok(rows);
+    }
+
+    Ok(vec![OrderItem {
+        product_id: fallback_product_id,
+        product_slug: fallback_slug.to_string(),
+        quantity: fallback_qty,
+        unit_price_cents: fallback_unit_cents,
+        line_total_cents: fallback_total_cents,
+    }])
+}
+
 /// Sweeps lapsed reservations (STOCK-01): every `reserved` order past its
 /// `expires_at` is locked, moved to `expired`, and its units are RETURNED to
 /// the saleable pool (`stock_reserved` drops — a release is not a restock;
@@ -584,20 +733,32 @@ fn parse_signed_webhook(
 pub async fn expire_stale_reservations(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<usize, sqlx::Error> {
-    let expired: Vec<(i64, i64, i32)> = sqlx::query_as(
-        "SELECT id, product_id, quantity FROM orders \
-         WHERE status = 'reserved' AND expires_at <= now() FOR UPDATE",
+    let expired: Vec<(i64, i64, String, i32, i64, i64)> = sqlx::query_as(
+        "SELECT id, product_id, product_slug, quantity, unit_price_cents, total_cents \
+         FROM orders WHERE status = 'reserved' AND expires_at <= now() FOR UPDATE",
     )
     .fetch_all(&mut **tx)
     .await?;
-    for (order_id, product_id, quantity) in &expired {
-        sqlx::query(
-            "UPDATE products SET stock_reserved = GREATEST(0, stock_reserved - $1) WHERE id = $2",
+    for (order_id, product_id, product_slug, quantity, unit_price_cents, total_cents) in &expired {
+        let items = load_order_items_tx(
+            tx,
+            *order_id,
+            *product_id,
+            product_slug,
+            *quantity,
+            *unit_price_cents,
+            *total_cents,
         )
-        .bind(*quantity)
-        .bind(*product_id)
-        .execute(&mut **tx)
         .await?;
+        for item in &items {
+            sqlx::query(
+                "UPDATE products SET stock_reserved = GREATEST(0, stock_reserved - $1) WHERE id = $2",
+            )
+            .bind(item.quantity)
+            .bind(item.product_id)
+            .execute(&mut **tx)
+            .await?;
+        }
         sqlx::query("UPDATE orders SET status = 'expired', updated_at = now() WHERE id = $1")
             .bind(*order_id)
             .execute(&mut **tx)
@@ -627,7 +788,9 @@ struct LockedOrder {
     id: i64,
     order_code: String,
     product_id: i64,
+    product_slug: String,
     quantity: i32,
+    unit_price_cents: i64,
     payment_method: String,
     status: String,
     total_cents: i64,
@@ -639,7 +802,8 @@ async fn lock_order_by_code(
     order_code: &str,
 ) -> Result<Option<LockedOrder>, sqlx::Error> {
     sqlx::query_as::<_, LockedOrder>(
-        "SELECT id, order_code, product_id, quantity, payment_method, status, total_cents, currency \
+        "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
+             payment_method, status, total_cents, currency \
          FROM orders WHERE order_code = $1 FOR UPDATE",
     )
     .bind(order_code)
@@ -652,12 +816,56 @@ async fn lock_order_by_id(
     id: i64,
 ) -> Result<Option<LockedOrder>, sqlx::Error> {
     sqlx::query_as::<_, LockedOrder>(
-        "SELECT id, order_code, product_id, quantity, payment_method, status, total_cents, currency \
+        "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
+             payment_method, status, total_cents, currency \
          FROM orders WHERE id = $1 FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(&mut **tx)
     .await
+}
+
+async fn load_public_order_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_code: &str,
+) -> Result<Option<PublicOrderStatus>, sqlx::Error> {
+    let row = sqlx::query_as::<_, PublicOrderStatusRow>(
+        "SELECT id, order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
+             payment_method, status, fps_reference, expires_at, created_at \
+         FROM orders WHERE order_code = $1",
+    )
+    .bind(order_code)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let items = load_order_items_tx(
+        tx,
+        row.id,
+        0,
+        &row.product_slug,
+        row.quantity,
+        row.unit_price_cents,
+        row.total_cents,
+    )
+    .await?;
+
+    Ok(Some(PublicOrderStatus {
+        order_code: row.order_code,
+        product_slug: row.product_slug,
+        quantity: row.quantity,
+        unit_price_cents: row.unit_price_cents,
+        total_cents: row.total_cents,
+        currency: row.currency,
+        payment_method: row.payment_method,
+        status: row.status,
+        fps_reference: row.fps_reference,
+        expires_at: row.expires_at,
+        created_at: row.created_at,
+        items,
+    }))
 }
 
 /// Re-reads the full admin row after a mutation (inside the same transaction:
@@ -666,7 +874,7 @@ async fn load_admin_order(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: i64,
 ) -> Result<Option<AdminOrder>, sqlx::Error> {
-    sqlx::query_as::<_, AdminOrder>(
+    let row = sqlx::query_as::<_, AdminOrderRow>(
         "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
              total_cents, currency, payment_method, status, customer_name, customer_email, \
              customer_phone, delivery_address, fps_reference, expires_at, created_at, updated_at \
@@ -674,7 +882,43 @@ async fn load_admin_order(
     )
     .bind(id)
     .fetch_optional(&mut **tx)
-    .await
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let items = load_order_items_tx(
+        tx,
+        row.id,
+        row.product_id,
+        &row.product_slug,
+        row.quantity,
+        row.unit_price_cents,
+        row.total_cents,
+    )
+    .await?;
+
+    Ok(Some(AdminOrder {
+        id: row.id,
+        order_code: row.order_code,
+        product_id: row.product_id,
+        product_slug: row.product_slug,
+        quantity: row.quantity,
+        unit_price_cents: row.unit_price_cents,
+        total_cents: row.total_cents,
+        currency: row.currency,
+        payment_method: row.payment_method,
+        status: row.status,
+        customer_name: row.customer_name,
+        customer_email: row.customer_email,
+        customer_phone: row.customer_phone,
+        delivery_address: row.delivery_address,
+        fps_reference: row.fps_reference,
+        expires_at: row.expires_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        items,
+    }))
 }
 
 /// The currency new orders are quoted in: the `settings` override when
@@ -767,41 +1011,71 @@ async fn reserve_once(
     pool: &PgPool,
     req: &CreateReservationRequest,
 ) -> Result<Result<OrderResponse, ReserveRejection>, ReserveFailure> {
+    let requested_items =
+        normalized_reservation_items(req).map_err(|_| ReserveFailure::MoneyOverflow)?;
     let mut tx = pool.begin().await.map_err(ReserveFailure::Db)?;
     expire_stale_reservations(&mut tx)
         .await
         .map_err(ReserveFailure::Db)?;
 
-    // Lock the product row first: everything below is serialised per SKU.
-    let product: Option<LockedProduct> = sqlx::query_as(
-        "SELECT id, slug, price_cents, active, stock_total, stock_reserved, stock_quarantined \
-         FROM products WHERE slug = $1 FOR UPDATE",
-    )
-    .bind(&req.slug)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(ReserveFailure::Db)?;
+    // Lock product rows in ascending slug order to prevent deadlocks when two
+    // multi-SKU carts check out concurrently.
+    let mut slugs_sorted: Vec<String> = requested_items.iter().map(|i| i.slug.clone()).collect();
+    slugs_sorted.sort();
+    slugs_sorted.dedup();
 
-    let Some(product) = product else {
-        return Ok(Err(ReserveRejection::ProductNotFound));
-    };
-    // A hidden SKU answers exactly like a missing one (404): no storefront
-    // oracle for "this slug exists but is not for sale".
-    if !product.active {
-        return Ok(Err(ReserveRejection::ProductNotFound));
+    let mut locked_map = std::collections::HashMap::<String, LockedProduct>::new();
+    for slug in &slugs_sorted {
+        let product: Option<LockedProduct> = sqlx::query_as(
+            "SELECT id, slug, price_cents, active, stock_total, stock_reserved, stock_quarantined \
+             FROM products WHERE slug = $1 FOR UPDATE",
+        )
+        .bind(slug)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(ReserveFailure::Db)?;
+
+        let Some(product) = product else {
+            return Ok(Err(ReserveRejection::ProductNotFound));
+        };
+        if !product.active {
+            return Ok(Err(ReserveRejection::ProductNotFound));
+        }
+        locked_map.insert(slug.clone(), product);
     }
 
-    let available = i64::from(product.stock_total)
-        - i64::from(product.stock_reserved)
-        - i64::from(product.stock_quarantined);
-    if available < i64::from(req.quantity) {
-        return Ok(Err(ReserveRejection::InsufficientStock));
+    let mut resolved_items: Vec<OrderItem> = Vec::with_capacity(requested_items.len());
+    let mut total_cents: i64 = 0;
+    let mut total_quantity: i32 = 0;
+
+    for req_item in &requested_items {
+        let Some(product) = locked_map.get(&req_item.slug) else {
+            return Ok(Err(ReserveRejection::ProductNotFound));
+        };
+        let available = i64::from(product.stock_total)
+            - i64::from(product.stock_reserved)
+            - i64::from(product.stock_quarantined);
+        if available < i64::from(req_item.quantity) {
+            return Ok(Err(ReserveRejection::InsufficientStock));
+        }
+        let line_total_cents = order_total(product.price_cents, req_item.quantity)
+            .ok_or(ReserveFailure::MoneyOverflow)?;
+        total_cents = total_cents
+            .checked_add(line_total_cents)
+            .ok_or(ReserveFailure::MoneyOverflow)?;
+        total_quantity = total_quantity
+            .checked_add(req_item.quantity)
+            .ok_or(ReserveFailure::MoneyOverflow)?;
+        resolved_items.push(OrderItem {
+            product_id: product.id,
+            product_slug: product.slug.clone(),
+            quantity: req_item.quantity,
+            unit_price_cents: product.price_cents,
+            line_total_cents,
+        });
     }
 
-    // Money from the DB only: the row just locked IS the price list.
-    let unit_price_cents = product.price_cents;
-    let total_cents =
-        order_total(unit_price_cents, req.quantity).ok_or(ReserveFailure::MoneyOverflow)?;
+    let primary = &resolved_items[0];
     let currency = order_currency(&mut tx).await.map_err(ReserveFailure::Db)?;
 
     let expires_at = match req.payment_method.as_str() {
@@ -809,12 +1083,14 @@ async fn reserve_once(
         _ => Utc::now() + Duration::hours(config::fps_reservation_ttl_hours()),
     };
 
-    sqlx::query("UPDATE products SET stock_reserved = stock_reserved + $1 WHERE id = $2")
-        .bind(req.quantity)
-        .bind(product.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(ReserveFailure::Db)?;
+    for item in &resolved_items {
+        sqlx::query("UPDATE products SET stock_reserved = stock_reserved + $1 WHERE id = $2")
+            .bind(item.quantity)
+            .bind(item.product_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(ReserveFailure::Db)?;
+    }
 
     let order_code = next_order_code();
     let (id, created_at): (i64, DateTime<Utc>) = sqlx::query_as(
@@ -825,10 +1101,10 @@ async fn reserve_once(
          RETURNING id, created_at",
     )
     .bind(&order_code)
-    .bind(product.id)
-    .bind(&product.slug)
-    .bind(req.quantity)
-    .bind(unit_price_cents)
+    .bind(primary.product_id)
+    .bind(&primary.product_slug)
+    .bind(total_quantity)
+    .bind(primary.unit_price_cents)
     .bind(total_cents)
     .bind(&currency)
     .bind(&req.payment_method)
@@ -847,14 +1123,32 @@ async fn reserve_once(
         }
     })?;
 
+    for item in &resolved_items {
+        sqlx::query(
+            "INSERT INTO order_items (order_id, product_id, product_slug, quantity, \
+                 unit_price_cents, line_total_cents, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(item.product_id)
+        .bind(&item.product_slug)
+        .bind(item.quantity)
+        .bind(item.unit_price_cents)
+        .bind(item.line_total_cents)
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(ReserveFailure::Db)?;
+    }
+
     tx.commit().await.map_err(ReserveFailure::Db)?;
     Ok(Ok(OrderResponse {
         id,
         order_code,
-        product_id: product.id,
-        product_slug: product.slug,
-        quantity: req.quantity,
-        unit_price_cents,
+        product_id: primary.product_id,
+        product_slug: primary.product_slug.clone(),
+        quantity: total_quantity,
+        unit_price_cents: primary.unit_price_cents,
         total_cents,
         currency,
         payment_method: req.payment_method.clone(),
@@ -863,6 +1157,7 @@ async fn reserve_once(
         customer_email: req.customer_email.clone(),
         expires_at,
         created_at,
+        items: resolved_items,
     }))
 }
 
@@ -898,15 +1193,9 @@ pub async fn get_order_by_code(
     expire_stale_reservations(&mut tx)
         .await
         .map_err(|e| state::database_unavailable("failed to expire stale reservations", &e))?;
-    let order = sqlx::query_as::<_, PublicOrderStatus>(
-        "SELECT order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
-             payment_method, status, fps_reference, expires_at, created_at \
-         FROM orders WHERE order_code = $1",
-    )
-    .bind(&order_code)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| state::database_unavailable("failed to load order", &e))?;
+    let order = load_public_order_tx(&mut tx, &order_code)
+        .await
+        .map_err(|e| state::database_unavailable("failed to load order", &e))?;
     // Commit (not roll back): the sweep above is a real state change.
     tx.commit()
         .await
@@ -989,15 +1278,28 @@ pub async fn stripe_webhook(
 
     let new_status = match payment_transition(&order.status) {
         PaymentTransition::MarkPaid => {
-            sqlx::query(
-                "UPDATE products SET stock_total = stock_total - $1, \
-                     stock_reserved = stock_reserved - $1 WHERE id = $2",
+            let items = load_order_items_tx(
+                &mut tx,
+                order.id,
+                order.product_id,
+                &order.product_slug,
+                order.quantity,
+                order.unit_price_cents,
+                order.total_cents,
             )
-            .bind(order.quantity)
-            .bind(order.product_id)
-            .execute(&mut *tx)
             .await
-            .map_err(|e| state::database_unavailable("failed to consume reserved stock", &e))?;
+            .map_err(|e| state::database_unavailable("failed to load order items", &e))?;
+            for item in &items {
+                sqlx::query(
+                    "UPDATE products SET stock_total = stock_total - $1, \
+                         stock_reserved = stock_reserved - $1 WHERE id = $2",
+                )
+                .bind(item.quantity)
+                .bind(item.product_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| state::database_unavailable("failed to consume reserved stock", &e))?;
+            }
             sqlx::query("UPDATE orders SET status = 'paid', updated_at = now() WHERE id = $1")
                 .bind(order.id)
                 .execute(&mut *tx)
@@ -1055,17 +1357,60 @@ pub async fn list_orders(
     sweep_stale_reservations(pool)
         .await
         .map_err(|e| state::database_unavailable("failed to expire stale reservations", &e))?;
-    let rows = sqlx::query_as::<_, AdminOrder>(
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| state::database_unavailable("failed to open orders list", &e))?;
+    let rows = sqlx::query_as::<_, AdminOrderRow>(
         "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
              total_cents, currency, payment_method, status, customer_name, customer_email, \
              customer_phone, delivery_address, fps_reference, expires_at, created_at, updated_at \
          FROM orders ORDER BY created_at DESC, id DESC LIMIT 200",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| state::database_unavailable("failed to load orders", &e))?;
+
+    let mut orders = Vec::with_capacity(rows.len());
+    for row in rows {
+        let items = load_order_items_tx(
+            &mut tx,
+            row.id,
+            row.product_id,
+            &row.product_slug,
+            row.quantity,
+            row.unit_price_cents,
+            row.total_cents,
+        )
+        .await
+        .map_err(|e| state::database_unavailable("failed to load order items", &e))?;
+        orders.push(AdminOrder {
+            id: row.id,
+            order_code: row.order_code,
+            product_id: row.product_id,
+            product_slug: row.product_slug,
+            quantity: row.quantity,
+            unit_price_cents: row.unit_price_cents,
+            total_cents: row.total_cents,
+            currency: row.currency,
+            payment_method: row.payment_method,
+            status: row.status,
+            customer_name: row.customer_name,
+            customer_email: row.customer_email,
+            customer_phone: row.customer_phone,
+            delivery_address: row.delivery_address,
+            fps_reference: row.fps_reference,
+            expires_at: row.expires_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            items,
+        });
+    }
+    tx.commit()
+        .await
+        .map_err(|e| state::database_unavailable("failed to commit orders list", &e))?;
     // Order state is live data: never cacheable.
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(rows)))
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(orders)))
 }
 
 /// `POST /api/admin/orders/{id}/confirm-fps` — an FPS transfer arrived:
@@ -1107,15 +1452,28 @@ pub async fn confirm_fps_order(
 
     let (status_after, audit_action) = match fps_confirmation_transition(&order.status) {
         FpsTransition::MarkPaid => {
-            sqlx::query(
-                "UPDATE products SET stock_total = stock_total - $1, \
-                     stock_reserved = stock_reserved - $1 WHERE id = $2",
+            let items = load_order_items_tx(
+                &mut tx,
+                order.id,
+                order.product_id,
+                &order.product_slug,
+                order.quantity,
+                order.unit_price_cents,
+                order.total_cents,
             )
-            .bind(order.quantity)
-            .bind(order.product_id)
-            .execute(&mut *tx)
             .await
-            .map_err(|e| state::database_unavailable("failed to consume reserved stock", &e))?;
+            .map_err(|e| state::database_unavailable("failed to load order items", &e))?;
+            for item in &items {
+                sqlx::query(
+                    "UPDATE products SET stock_total = stock_total - $1, \
+                         stock_reserved = stock_reserved - $1 WHERE id = $2",
+                )
+                .bind(item.quantity)
+                .bind(item.product_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| state::database_unavailable("failed to consume reserved stock", &e))?;
+            }
             ("paid", "confirm_fps")
         }
         FpsTransition::LatePaymentReview => ("late_payment_review", "late_fps_review"),
@@ -1181,12 +1539,25 @@ pub async fn release_order(
         return Err(conflict("order is not reserved"));
     }
 
-    sqlx::query("UPDATE products SET stock_reserved = stock_reserved - $1 WHERE id = $2")
-        .bind(order.quantity)
-        .bind(order.product_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| state::database_unavailable("failed to release reserved stock", &e))?;
+    let items = load_order_items_tx(
+        &mut tx,
+        order.id,
+        order.product_id,
+        &order.product_slug,
+        order.quantity,
+        order.unit_price_cents,
+        order.total_cents,
+    )
+    .await
+    .map_err(|e| state::database_unavailable("failed to load order items", &e))?;
+    for item in &items {
+        sqlx::query("UPDATE products SET stock_reserved = stock_reserved - $1 WHERE id = $2")
+            .bind(item.quantity)
+            .bind(item.product_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| state::database_unavailable("failed to release reserved stock", &e))?;
+    }
     sqlx::query("UPDATE orders SET status = 'cancelled', updated_at = now() WHERE id = $1")
         .bind(order.id)
         .execute(&mut *tx)
@@ -1236,15 +1607,28 @@ pub async fn quarantine_return_order(
     // Back in the building (stock_total) but NOT on sale (stock_quarantined):
     // `available = stock_total - stock_reserved - stock_quarantined` is
     // deliberately unchanged by this write.
-    sqlx::query(
-        "UPDATE products SET stock_total = stock_total + $1, \
-             stock_quarantined = stock_quarantined + $1 WHERE id = $2",
+    let items = load_order_items_tx(
+        &mut tx,
+        order.id,
+        order.product_id,
+        &order.product_slug,
+        order.quantity,
+        order.unit_price_cents,
+        order.total_cents,
     )
-    .bind(order.quantity)
-    .bind(order.product_id)
-    .execute(&mut *tx)
     .await
-    .map_err(|e| state::database_unavailable("failed to quarantine returned stock", &e))?;
+    .map_err(|e| state::database_unavailable("failed to load order items", &e))?;
+    for item in &items {
+        sqlx::query(
+            "UPDATE products SET stock_total = stock_total + $1, \
+                 stock_quarantined = stock_quarantined + $1 WHERE id = $2",
+        )
+        .bind(item.quantity)
+        .bind(item.product_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| state::database_unavailable("failed to quarantine returned stock", &e))?;
+    }
     sqlx::query(
         "UPDATE orders SET status = 'returned_quarantined', updated_at = now() WHERE id = $1",
     )
@@ -1313,15 +1697,10 @@ pub async fn submit_customer_fps(
     .await
     .map_err(|e| state::database_unavailable("failed to save FPS reference", &e))?;
 
-    let updated = sqlx::query_as::<_, PublicOrderStatus>(
-        "SELECT order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
-             payment_method, status, fps_reference, expires_at, created_at \
-         FROM orders WHERE id = $1",
-    )
-    .bind(order.id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| state::database_unavailable("failed to reload order", &e))?;
+    let updated = load_public_order_tx(&mut tx, &order.order_code)
+        .await
+        .map_err(|e| state::database_unavailable("failed to reload order", &e))?
+        .ok_or_else(|| not_found("order not found"))?;
     tx.commit()
         .await
         .map_err(|e| state::database_unavailable("failed to commit FPS reference", &e))?;
@@ -1350,29 +1729,37 @@ pub async fn cancel_customer_order(
         return Err(conflict("order is not reserved"));
     }
 
-    sqlx::query(
-        "UPDATE products SET stock_reserved = GREATEST(0, stock_reserved - $1) WHERE id = $2",
+    let items = load_order_items_tx(
+        &mut tx,
+        order.id,
+        order.product_id,
+        &order.product_slug,
+        order.quantity,
+        order.unit_price_cents,
+        order.total_cents,
     )
-    .bind(order.quantity)
-    .bind(order.product_id)
-    .execute(&mut *tx)
     .await
-    .map_err(|e| state::database_unavailable("failed to release reserved stock", &e))?;
+    .map_err(|e| state::database_unavailable("failed to load order items", &e))?;
+    for item in &items {
+        sqlx::query(
+            "UPDATE products SET stock_reserved = GREATEST(0, stock_reserved - $1) WHERE id = $2",
+        )
+        .bind(item.quantity)
+        .bind(item.product_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| state::database_unavailable("failed to release reserved stock", &e))?;
+    }
     sqlx::query("UPDATE orders SET status = 'cancelled', updated_at = now() WHERE id = $1")
         .bind(order.id)
         .execute(&mut *tx)
         .await
         .map_err(|e| state::database_unavailable("failed to cancel order", &e))?;
 
-    let updated = sqlx::query_as::<_, PublicOrderStatus>(
-        "SELECT order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
-             payment_method, status, fps_reference, expires_at, created_at \
-         FROM orders WHERE id = $1",
-    )
-    .bind(order.id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| state::database_unavailable("failed to reload order", &e))?;
+    let updated = load_public_order_tx(&mut tx, &order.order_code)
+        .await
+        .map_err(|e| state::database_unavailable("failed to reload order", &e))?
+        .ok_or_else(|| not_found("order not found"))?;
     tx.commit()
         .await
         .map_err(|e| state::database_unavailable("failed to commit order cancellation", &e))?;
@@ -1462,6 +1849,7 @@ mod tests {
         CreateReservationRequest {
             slug: "ph-2-1-table-chrome".to_string(),
             quantity: 2,
+            items: Vec::new(),
             payment_method: "card".to_string(),
             customer_name: "Ada Buyer".to_string(),
             customer_email: "ada@example.com".to_string(),
@@ -1792,6 +2180,20 @@ mod tests {
         assert_eq!(parsed_env.order_code, "ORD-99-1");
         assert_eq!(parsed_env.amount_cents, 714_000);
         assert_eq!(parsed_env.currency, "hkd");
+
+        // Unpaid checkout.session.completed (e.g. delayed async payment method) is rejected 400 (PAY-01 / STRIPE-01).
+        let unpaid_session = br#"{"id":"evt_unpaid_1","type":"checkout.session.completed","data":{"object":{"payment_status":"unpaid","metadata":{"order_code":"ORD-99-1"},"amount_total":714000,"currency":"hkd"}}}"#;
+        let unpaid_headers = headers_with(Some(&stripe_signature_header(
+            WEBHOOK_SECRET,
+            1_699_999_999,
+            unpaid_session,
+        )));
+        assert_error(
+            parse_signed_webhook(Some(WEBHOOK_SECRET), &unpaid_headers, unpaid_session)
+                .unwrap_err(),
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"unsupported or non-success stripe event type"}"#,
+        );
 
         // Non-success event types (e.g. payment_intent.payment_failed) are rejected 400 (PAY-01).
         let failed_event = br#"{"id":"evt_fail_1","type":"payment_intent.payment_failed","data":{"object":{"metadata":{"order_code":"ORD-99-1"},"amount":714000,"currency":"hkd"}}}"#;

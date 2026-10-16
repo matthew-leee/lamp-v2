@@ -34,10 +34,12 @@ pub enum ArtVariant {
     #[serde(rename = "shades-tall")]
     ShadesTall,
     Piano,
+    /// Plain-photo / non-schematic items (MEDIA-01c).
+    None,
 }
 
 impl ArtVariant {
-    /// Maps a DB value to its variant. Anything that is not one of the four
+    /// Maps a DB value to its variant. Anything that is not one of the five
     /// CHECK-constrained values falls back to `Dome`, the schema default: an
     /// unexpected value (only reachable if the CHECK constraint is dropped)
     /// must not take down the whole catalogue read.
@@ -46,6 +48,7 @@ impl ArtVariant {
             "shades" => Self::Shades,
             "shades-tall" => Self::ShadesTall,
             "piano" => Self::Piano,
+            "none" => Self::None,
             _ => Self::Dome,
         }
     }
@@ -583,6 +586,7 @@ mod tests {
             ("shades", ArtVariant::Shades),
             ("shades-tall", ArtVariant::ShadesTall),
             ("piano", ArtVariant::Piano),
+            ("none", ArtVariant::None),
         ] {
             assert_eq!(ArtVariant::parse(raw), variant, "parse({raw})");
             assert_eq!(

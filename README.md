@@ -4,25 +4,30 @@ Production-ready bilingual (`en` / `zh-HK`) ecommerce flagship and operator stud
 
 ## Key Architecture & Features
 
-1. **Zero-Hardcode White-Label Engine (`NAME-01`, `ENV-01`, `DATA-02`, `CONFIG-01`)**:
-   - Every company scalar (Brand Name, Native Chinese Wordmark, Canonical URL, Currency, WhatsApp Concierge, Analytics) is resolved dynamically from live Admin Settings overrides (`settings` table) -> Environment defaults (`.env`) -> safe code defaults.
+1. **Zero-Hardcode White-Label Engine (`NAME-01`, `ENV-01`, `DATA-02`, `CONFIG-01`, `FPS-01`)**:
+   - Every company scalar (Brand Name, Native Chinese Wordmark, Canonical URL, Currency, WhatsApp Concierge, HK FPS Merchant ID / Account Name / QR Code, Analytics) is resolved dynamically from live Admin Settings overrides (`settings` table) -> Environment defaults (`.env`) -> safe code defaults.
    - All product SKUs, prices (integer minor units / cents), bilingual heritage & electrical copy, verified showroom reference prices, and numbered edition pieces (`01–16`) live in PostgreSQL and are managed through the Admin Studio with **0-second storefront propagation** (`revalidatePath("/", "layout")`).
 2. **Awwwards / Webby Exhibition Storefront (`web/`)**:
-   - **Synchronized Room Atmosphere (`Daylight 5500K` ↔ `Nocturne 2700K`)**: Toggle from the sticky header, hero, or `L` keyboard shortcut; cross-fades every lamp stage on the page with physically inspired 2700K radial light bloom, persisted across navigation.
+   - **Synchronized Room Atmosphere (`Daylight 5500K` ↔ `Nocturne 2700K`)**: Toggle from the sticky header, hero, or `L` keyboard shortcut; cross-fades dual-photo lamp stages with physically inspired 2700K radial light bloom, persisted across navigation.
+   - **Self-Sufficient Product Photo & Lighting Modes (`MEDIA-01`)**:
+     - Dual-photo SKUs (`image_day_url` + `image_lit_url`) cross-fade between Daylight 5500K and Nocturne 2700K with radial bloom.
+     - Single-photo SKUs (`image_day_url` only, `image_lit_url` blank) render as clean plain photographs without artificial tinting or redundant 2700K tabs.
+     - Setting `art_variant = "none"` disables the 1:10 CAD schematic tab for plain-photo or non-lamp items.
+     - All 8 opening-drop demo images are cached locally under `web/public/demo-assets/` so zero external CDN timeouts occur.
    - **Interactive Collector's Edition `01–16` Matrix**: Live serialized edition strip with piece preview and real-time vault stock indicators.
-   - **3-Mode Product Light Studio**: Switch between *Daylight 5500K Cutout*, *2700K Lit*, and *1:10 CAD Scale & Blueprint* (with a 220mm hardcover book reference outline), plus in-place **Sibling Colourway Swatches** and a **Visual Market Price Comparison Bar (`Save 15%–42%`)**.
    - **Crash-Proof New Products**: Newly created SKUs with `0` assigned pieces or empty copy render cleanly as **Open Edition / 常設單品**.
-3. **End-to-End Shopping Bag, Checkout & Payment Settlement**:
-   - Slide-over **Collector's Bag Drawer** with live vault stock caps and curated empty-bag discovery.
-   - **Dedicated Checkout & Payment Settlement Page (`/[lang]/checkout/[code]`)** with live hold countdown timer, **Interactive Stripe Card Gateway** (with 1-click test card autofill `4242` and decline test `0002`), **HK FPS Faster Payment QR/ID & Reference Submission**, self-service hold cancellation, **Printable Official Collector's Pass**, and an on-screen **Dispatched Email Notification Preview**.
+3. **Multi-SKU Shopping Cart, Real Stripe & HK FPS Settlement, and Live Transactional Emails (`CART-01`, `STRIPE-01`, `FPS-01`, `EMAIL-01`)**:
+   - Slide-over **Shopping Cart (`購物車` / `加入購物車`)** supporting atomic multi-SKU reservation and checkout for **1 SKU up to all SKUs in the store** (`order_items` table with deadlock-free sorted row locking).
+   - **Dedicated Checkout & Payment Settlement Page (`/[lang]/checkout/[code]`)** displaying all cart line items, live hold countdown timer, **Real Stripe Sandbox/Live Hosted Checkout Session + Return `session_id` & HMAC Webhook Verification (`POST /api/webhooks/stripe`)** alongside local test card fallback (`4242` success / `0002` decline recovery), **Live Admin-Configurable HK FPS Faster Payment Instructions & QR Code**, self-service hold cancellation, **Printable Official Collector's Pass**, and **Live Transactional HTML Email Delivery (`RESEND_API_KEY` or `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS`)** + on-screen Email Preview modal.
 4. **Operator-First Admin Studio (`/admin`)**:
-   - **Unified Single-Save Product Studio (`/admin/products/[id]`)** with real-time as-you-type 3-stage preview, **direct photo file upload**, **1-click Duplicate/Clone SKU**, human **Dollar** price inputs, side-by-side `EN | 繁體中文` copy editors, and **Quarantine Inspection** (*Pass Inspection -> Restock* or *Write Off Damaged*).
+   - **Unified Single-Save Product Studio (`/admin/products/[id]`)** with real-time as-you-type stage preview, **direct photo file upload**, **1-click Duplicate/Clone SKU**, human **Dollar** price inputs, `art_variant` (`dome | shades | shades-tall | piano | none`), side-by-side `EN | 繁體中文` copy editors, and **Quarantine Inspection** (*Pass Inspection -> Restock* or *Write Off Damaged*).
+   - **Multi-SKU Orders & Quarantine Console (`/admin/orders`)** and **Live Company & FPS Settings (`/admin/settings`)**.
 
 ## Development & Verification
 
 ```bash
 # Rust API (port 18080)
-cd api && cargo test
+cd api && STOREFRONT_TEST_DATABASE_URL="postgres://storefront:scratch-only@localhost:55433/storefront_scratch" cargo test
 # Next.js Web (port 3002)
-cd web && npm run typecheck && npm run build && npm test
+cd web && npm run lint && npm run typecheck && npm run build && npm test
 ```

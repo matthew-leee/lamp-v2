@@ -39,6 +39,9 @@ pub const PUBLIC_SETTING_KEYS: &[&str] = &[
     "analytics.ga_measurement_id",
     "analytics.gsc_verification",
     "currency",
+    "payment.fps_id",
+    "payment.fps_account_name",
+    "payment.fps_qr_url",
 ];
 
 /// Result of [`filter_public_settings`].
@@ -150,6 +153,9 @@ mod tests {
                 "analytics.ga_measurement_id",
                 "analytics.gsc_verification",
                 "currency",
+                "payment.fps_id",
+                "payment.fps_account_name",
+                "payment.fps_qr_url",
             ]
             .into_iter()
             .collect::<BTreeSet<_>>()
@@ -159,9 +165,10 @@ mod tests {
     #[test]
     fn filter_passes_whitelisted_keys() {
         let filtered = filter_public_settings([
-            row("brand.name", "HVILE"),
+            row("brand.name", "ATELIER"),
             row("site.url", "https://shop.example.com"),
             row("currency", "HKD"),
+            row("payment.fps_id", "10849201"),
         ]);
         assert_eq!(
             filtered
@@ -169,9 +176,10 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            vec!["brand.name", "currency", "site.url"]
+            vec!["brand.name", "currency", "payment.fps_id", "site.url"]
         );
-        assert_eq!(filtered.visible["brand.name"], "HVILE");
+        assert_eq!(filtered.visible["brand.name"], "ATELIER");
+        assert_eq!(filtered.visible["payment.fps_id"], "10849201");
         assert!(filtered.skipped.is_empty());
     }
 
@@ -199,7 +207,8 @@ mod tests {
 
     #[test]
     fn settings_response_is_flat_key_value() {
-        let filtered = filter_public_settings([row("brand.name", "HVILE"), row("currency", "HKD")]);
+        let filtered =
+            filter_public_settings([row("brand.name", "ATELIER"), row("currency", "HKD")]);
         let value = serde_json::to_value(SettingsResponse(filtered.visible)).unwrap();
         assert_eq!(
             value
@@ -210,7 +219,7 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             ["brand.name", "currency"].into_iter().collect()
         );
-        assert_eq!(value["brand.name"], "HVILE");
+        assert_eq!(value["brand.name"], "ATELIER");
         assert_eq!(value["currency"], "HKD");
     }
 

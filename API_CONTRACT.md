@@ -23,8 +23,8 @@ Returns all active products (`WHERE active = TRUE`) with their locale-keyed copy
         "active": true,
         "art_variant": "dome",
         "art_hue": 35,
-        "image_day_url": "https://...",
-        "image_lit_url": "https://...",
+        "image_day_url": "/demo-assets/panthella-160-v3-beige.png",
+        "image_lit_url": "/demo-assets/panthella-160-v3-beige.png",
         "designer": "Verner Panton",
         "design_year": "1971",
         "dimensions": "Ø 160 × H 238 mm",
@@ -56,7 +56,7 @@ Returns all active products (`WHERE active = TRUE`) with their locale-keyed copy
   }
   ```
   - Note: Newly created products may have `pieces: []` (`units_in_drop: 0`), `reference_price: null`, and empty/partial `content: {}`. The frontend must render those gracefully without throwing.
-  - `art_variant` is one of `"dome" | "shades" | "shades-tall" | "piano"`.
+  - `art_variant` is one of `"dome" | "shades" | "shades-tall" | "piano" | "none"`.
 
 ### `GET /api/products`
 Live stock channel (`Cache-Control: no-store`). Automatically sweeps expired reservations before reading.
@@ -92,9 +92,9 @@ Locale-keyed company and editorial copy (`site_content` table).
   - Template placeholders `{brand}`, `{pieces}`, and `{subject}` are interpolated by the caller.
 
 ### `GET /api/settings`
-Public runtime overrides (`settings` table), restricted to the 7 whitelisted company keys:
-`brand.name`, `brand.name_native`, `site.url`, `contact.whatsapp`, `currency`, `analytics.ga_measurement_id`, `analytics.gsc_verification`.
-- **Response `200 OK`**: Flat JSON map `{"brand.name": "...", "currency": "HKD"}`.
+Public runtime overrides (`settings` table), restricted to the 10 whitelisted company keys:
+`brand.name`, `brand.name_native`, `site.url`, `contact.whatsapp`, `currency`, `analytics.ga_measurement_id`, `analytics.gsc_verification`, `payment.fps_id`, `payment.fps_account_name`, `payment.fps_qr_url`.
+- **Response `200 OK`**: Flat JSON map `{"brand.name": "...", "currency": "HKD", "payment.fps_id": "..."}`.
 - Resolution order (`CONFIG-01`): `settings` override (where empty string `""` on an optional key means explicitly OFF) -> `NEXT_PUBLIC_*` environment variable -> code default (`currency` defaults to `"HKD"`).
 
 ---
@@ -102,12 +102,14 @@ Public runtime overrides (`settings` table), restricted to the 7 whitelisted com
 ## 2. Public Checkout, Order & Payment Webhook Endpoints
 
 ### `POST /api/orders/reserve`
-Atomically reserves stock (`30 minutes` for `"card"`, `24 hours` for `"fps"`) using the authoritative database price (`products.price_cents`).
+Atomically reserves stock (`30 minutes` for `"card"`, `24 hours` for `"fps"`) using the authoritative database price (`products.price_cents`) across 1 to N distinct SKUs (`CART-01`, `order_items` table).
 - **Request JSON**:
   ```json
   {
-    "slug": "panthella-160-v3-beige",
-    "quantity": 1,
+    "items": [
+      { "slug": "panthella-160-v3-beige", "quantity": 1 },
+      { "slug": "ph-2-1-table-chrome", "quantity": 1 }
+    ],
     "payment_method": "card",
     "customer_name": "Chan Tai Man",
     "customer_email": "chan@example.com",
@@ -115,6 +117,7 @@ Atomically reserves stock (`30 minutes` for `"card"`, `24 hours` for `"fps"`) us
     "delivery_address": "Central, Hong Kong"
   }
   ```
+  *(Single-SKU `slug` + `quantity` fields are also accepted for backward compatibility.)*
 - **Response `200 OK`**:
   ```json
   {
@@ -122,36 +125,68 @@ Atomically reserves stock (`30 minutes` for `"card"`, `24 hours` for `"fps"`) us
     "order_code": "ORD-1760500000000-1",
     "product_id": 1,
     "product_slug": "panthella-160-v3-beige",
-    "quantity": 1,
+    "quantity": 2,
     "unit_price_cents": 161500,
-    "total_cents": 161500,
+    "total_cents": 875500,
     "currency": "HKD",
     "payment_method": "card",
     "status": "reserved",
     "customer_name": "Chan Tai Man",
     "customer_email": "chan@example.com",
     "expires_at": "2026-10-15T06:30:00Z",
-    "created_at": "2026-10-15T06:00:00Z"
+    "created_at": "2026-10-15T06:00:00Z",
+    "items": [
+      {
+        "product_id": 1,
+        "product_slug": "panthella-160-v3-beige",
+        "quantity": 1,
+        "unit_price_cents": 161500,
+        "line_total_cents": 161500
+      },
+      {
+        "product_id": 6,
+        "product_slug": "ph-2-1-table-chrome",
+        "quantity": 1,
+        "unit_price_cents": 714000,
+        "line_total_cents": 714000
+      }
+    ]
   }
   ```
 - **Error Responses**: `400` validation error, `404` product not found/inactive, `409` `{"error": "insufficient stock available"}`.
 
 ### `GET /api/orders/{order_code}`
-Sweeps expired holds and returns public order status (`Cache-Control: no-store`, no PII).
+Sweeps expired holds and returns public order status (`Cache-Control: no-store`, no PII) including all line items (`items`).
 - **Response `200 OK`**:
   ```json
   {
     "order_code": "ORD-1760500000000-1",
     "product_slug": "panthella-160-v3-beige",
-    "quantity": 1,
+    "quantity": 2,
     "unit_price_cents": 161500,
-    "total_cents": 161500,
+    "total_cents": 875500,
     "currency": "HKD",
     "payment_method": "card",
     "status": "reserved",
     "fps_reference": "",
     "expires_at": "2026-10-15T06:30:00Z",
-    "created_at": "2026-10-15T06:00:00Z"
+    "created_at": "2026-10-15T06:00:00Z",
+    "items": [
+      {
+        "product_id": 1,
+        "product_slug": "panthella-160-v3-beige",
+        "quantity": 1,
+        "unit_price_cents": 161500,
+        "line_total_cents": 161500
+      },
+      {
+        "product_id": 6,
+        "product_slug": "ph-2-1-table-chrome",
+        "quantity": 1,
+        "unit_price_cents": 714000,
+        "line_total_cents": 714000
+      }
+    ]
   }
   ```
 

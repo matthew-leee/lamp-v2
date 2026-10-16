@@ -8,6 +8,14 @@ import type { CatalogueProduct } from "@/lib/api";
 import { formatEditionBadge, formatMoney, formatProductTitle } from "@/lib/format";
 import { htmlLang, t, ui, type Locale } from "@/lib/i18n";
 
+export interface PublicOrderItemData {
+  product_id: number;
+  product_slug: string;
+  quantity: number;
+  unit_price_cents: number;
+  line_total_cents: number;
+}
+
 export interface PublicOrderData {
   order_code: string;
   product_slug: string;
@@ -20,6 +28,7 @@ export interface PublicOrderData {
   fps_reference: string;
   expires_at: string;
   created_at: string;
+  items?: PublicOrderItemData[];
   email_receipt?: {
     subject: string;
     html: string;
@@ -30,9 +39,16 @@ interface CheckoutSettlementClientProps {
   lang: Locale;
   initialOrder: PublicOrderData;
   product: CatalogueProduct | null;
+  allProducts?: CatalogueProduct[];
   totalPieces: number;
   brandName: string;
   whatsappNumber: string | null;
+  fpsId?: string | null;
+  fpsAccountName?: string | null;
+  fpsQrUrl?: string | null;
+  stripePublishableKey?: string | null;
+  stripeRedirectConfigured?: boolean;
+  returnSessionId?: string | null;
 }
 
 function formatRemainingTime(expiresAtIso: string): {
@@ -58,8 +74,15 @@ export default function CheckoutSettlementClient({
   lang,
   initialOrder,
   product,
+  allProducts = [],
   totalPieces,
   brandName,
+  fpsId = null,
+  fpsAccountName = null,
+  fpsQrUrl = null,
+  stripePublishableKey = null,
+  stripeRedirectConfigured = false,
+  returnSessionId = null,
 }: CheckoutSettlementClientProps) {
   const { lit, refreshStock } = useStorefront();
   const [order, setOrder] = useState<PublicOrderData>(initialOrder);
@@ -90,19 +113,78 @@ export default function CheckoutSettlementClient({
     return () => clearInterval(timer);
   }, [order.expires_at]);
 
-  const localeCopy = product?.content[lang] ?? product?.content.en ?? {};
-  const productTitle = product
-    ? formatProductTitle(
-        product.model,
-        localeCopy.model_alt,
-        localeCopy.colourway,
-        lang,
-      )
-    : order.product_slug;
+  // STRIPE-01: if returning from a hosted Stripe Checkout session with ?session_id=..., verify immediately
+  useEffect(() => {
+    if (!returnSessionId || order.status === "paid" || order.status === "fulfilled") return;
+    let active = true;
+    (async () => {
+      setPaying(true);
+      try {
+        const res = await fetch(
+          `/api/orders/${encodeURIComponent(order.order_code)}/pay-card`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mode: "verify_session",
+              sessionId: returnSessionId,
+              locale: lang,
+            }),
+          },
+        );
+        if (!res.ok && active) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          setPaymentError(
+            data.error ??
+              (lang === "zh-HK"
+                ? "未能核實 Stripe 付款狀態。"
+                : "Could not verify Stripe payment session."),
+          );
+        }
+        if (active) {
+          await reloadOrder();
+        }
+      } finally {
+        if (active) setPaying(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [returnSessionId]);
 
-  const editionBadge = product
-    ? formatEditionBadge(product.pieces, totalPieces, lang)
-    : "";
+  const orderItems: PublicOrderItemData[] =
+    order.items && order.items.length > 0
+      ? order.items
+      : [
+          {
+            product_id: 0,
+            product_slug: order.product_slug,
+            quantity: order.quantity,
+            unit_price_cents: order.unit_price_cents,
+            line_total_cents: order.total_cents,
+          },
+        ];
+
+  const enrichedItems = orderItems.map((it) => {
+    const found =
+      allProducts.find((p) => p.slug === it.product_slug) ??
+      (product?.slug === it.product_slug ? product : null);
+    const copy = found?.content[lang] ?? found?.content.en ?? {};
+    const title = found
+      ? formatProductTitle(found.model, copy.model_alt, copy.colourway, lang)
+      : it.product_slug;
+    const badge = found
+      ? formatEditionBadge(found.pieces, totalPieces, lang)
+      : "";
+    return {
+      ...it,
+      product: found,
+      title,
+      badge,
+    };
+  });
 
   const statusEntry =
     ui.orderStatusMap[order.status] ?? ui.orderStatusMap.reserved!;
@@ -121,6 +203,47 @@ export default function CheckoutSettlementClient({
     await refreshStock();
   }
 
+  async function handleHostedStripeCheckout() {
+    if (paying) return;
+    setPaying(true);
+    setPaymentError(null);
+    try {
+      const res = await fetch(
+        `/api/orders/${encodeURIComponent(order.order_code)}/pay-card`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "stripe_checkout",
+            locale: lang,
+          }),
+        },
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        checkout_url?: string;
+        error?: string;
+      };
+      if (!res.ok || !data.checkout_url) {
+        setPaymentError(
+          data.error ??
+            (lang === "zh-HK"
+              ? "未能建立 Stripe 結帳頁面，請使用下方信用卡表格。"
+              : "Could not open hosted Stripe Checkout. Please use the card form below."),
+        );
+        return;
+      }
+      window.location.href = data.checkout_url;
+    } catch {
+      setPaymentError(
+        lang === "zh-HK"
+          ? "Stripe 連線異常，請重試。"
+          : "Stripe connection error. Please retry.",
+      );
+    } finally {
+      setPaying(false);
+    }
+  }
+
   async function handleCardPayment(e: FormEvent) {
     e.preventDefault();
     if (paying) return;
@@ -133,6 +256,8 @@ export default function CheckoutSettlementClient({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            mode: "direct",
+            locale: lang,
             cardholderName,
             cardNumber,
             expiry,
@@ -232,6 +357,12 @@ export default function CheckoutSettlementClient({
     setPaymentError(null);
   }
 
+  const displayFpsId =
+    fpsId ??
+    (lang === "zh-HK" ? "請向專員查詢或於後台設定" : "Pending Admin Configuration");
+  const displayFpsAccount =
+    fpsAccountName ?? brandName;
+
   return (
     <div className="mx-auto max-w-6xl px-5 pb-28 pt-10 sm:px-10">
       {/* Top Bar */}
@@ -291,7 +422,7 @@ export default function CheckoutSettlementClient({
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--border-hairline)] pb-5">
               <div>
                 <p className="text-[11px] tracking-[0.22em] uppercase text-[var(--text-secondary)]">
-                  {brandName} · HONG KONG VAULT
+                  {brandName} · {lang === "zh-HK" ? "香港典藏庫" : "HONG KONG VAULT"}
                 </p>
                 <h1
                   lang={htmlLang[lang]}
@@ -330,7 +461,7 @@ export default function CheckoutSettlementClient({
                   <p className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
                     {lang === "zh-HK"
                       ? "請於倒數結束前完成付款，逾時配額將自動釋放予其他藏家。"
-                      : "Complete settlement before the hold timer expires to secure this piece."}
+                      : "Complete settlement before the hold timer expires to secure your pieces."}
                   </p>
                 </div>
                 <div className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-card)] px-4 py-2 font-mono text-lg font-semibold text-[var(--color-glow)]">
@@ -348,12 +479,26 @@ export default function CheckoutSettlementClient({
                       ? "官方編號典藏認購證明"
                       : "OFFICIAL SERIALIZED EDITION PASS"}
                   </p>
-                  <h2 className="mt-2 font-display text-2xl">{productTitle}</h2>
-                  {editionBadge && (
-                    <p className="mt-1 text-xs tracking-[0.16em] uppercase text-[var(--text-secondary)]">
-                      {editionBadge}
-                    </p>
-                  )}
+                  <div className="mt-3 space-y-2">
+                    {enrichedItems.map((it) => (
+                      <div
+                        key={it.product_slug}
+                        className="flex items-baseline justify-between gap-4"
+                      >
+                        <div>
+                          <h2 className="font-display text-xl">{it.title}</h2>
+                          {it.badge && (
+                            <p className="text-[11px] tracking-[0.16em] uppercase text-[var(--text-secondary)]">
+                              {it.badge}
+                            </p>
+                          )}
+                        </div>
+                        <span className="tabular-nums font-mono text-sm">
+                          × {it.quantity}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
 
                   <dl className="mt-6 grid grid-cols-2 gap-4 border-t border-[var(--border-hairline)] pt-4 text-xs">
                     <div>
@@ -393,125 +538,171 @@ export default function CheckoutSettlementClient({
               </div>
             )}
 
-            {/* CASE 2: RESERVED + CARD -> Interactive Credit Card Gateway */}
+            {/* CASE 2: RESERVED + CARD -> Hosted Stripe Checkout or Local Test Card Gateway */}
             {isReserved && order.payment_method === "card" && (
-              <form onSubmit={handleCardPayment} className="no-print mt-8 space-y-5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h2 className="font-display text-xl">
-                    {lang === "zh-HK"
-                      ? "信用卡安全付款閘道 (Stripe)"
-                      : "Secure Card Settlement (Stripe)"}
-                  </h2>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={autofillSuccessCard}
-                      className="border border-[var(--color-glow)] px-2.5 py-1 text-[11px] tracking-[0.1em] uppercase text-[var(--color-glow)] hover:bg-[var(--color-glow)] hover:text-[#11100e]"
-                    >
-                      {lang === "zh-HK"
-                        ? "填入測試卡 (4242 成功)"
-                        : "Autofill Test Card (4242)"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={autofillDeclineCard}
-                      className="border border-[var(--border-hairline)] px-2.5 py-1 text-[11px] tracking-[0.1em] uppercase text-[var(--text-secondary)] hover:border-[var(--color-error)]"
-                    >
-                      {lang === "zh-HK"
-                        ? "測試拒付卡 (0002)"
-                        : "Test Decline (0002)"}
-                    </button>
+              <div className="no-print mt-8 space-y-6">
+                {stripeRedirectConfigured ? (
+                  <div className="border border-[var(--color-glow)] bg-[var(--surface-elevated)] p-5">
+                    {paymentError && (
+                      <div
+                        role="alert"
+                        className="mb-4 border-l-4 border-[var(--color-error)] bg-[var(--surface-card)] p-3.5 text-xs text-[var(--text-primary)]"
+                      >
+                        {paymentError}
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-glow)]">
+                          {lang === "zh-HK"
+                            ? "Stripe 官方安全結帳"
+                            : "Stripe Hosted Checkout"}
+                        </p>
+                        <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                          {lang === "zh-HK"
+                            ? "前往 Stripe 官方安全結帳頁面完成信用卡或 Apple Pay / Google Pay 付款。"
+                            : "Proceed to Stripe's hosted checkout page to settle all cart items via Card, Apple Pay, or Google Pay."}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={paying}
+                        onClick={handleHostedStripeCheckout}
+                        className="bg-[var(--color-glow)] px-5 py-3 text-xs font-semibold tracking-[0.18em] uppercase text-[#11100e] hover:opacity-90 disabled:opacity-50"
+                      >
+                        {lang === "zh-HK"
+                          ? "前往 Stripe 付款 →"
+                          : "Open Stripe Checkout →"}
+                      </button>
+                    </div>
                   </div>
-                </div>
-
-                {paymentError && (
-                  <div
-                    role="alert"
-                    className="border-l-4 border-[var(--color-error)] bg-[var(--surface-elevated)] p-3.5 text-xs text-[var(--text-primary)]"
-                  >
-                    {paymentError}
+                ) : (
+                <form onSubmit={handleCardPayment} className="space-y-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="font-display text-xl">
+                        {lang === "zh-HK"
+                          ? "信用卡安全付款閘道 (Stripe)"
+                          : "Secure Card Settlement (Stripe)"}
+                      </h2>
+                      {stripePublishableKey && (
+                        <p className="font-mono text-[10px] text-[var(--text-secondary)]">
+                          Key: {stripePublishableKey.slice(0, 12)}…
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={autofillSuccessCard}
+                        className="border border-[var(--color-glow)] px-2.5 py-1 text-[11px] tracking-[0.1em] uppercase text-[var(--color-glow)] hover:bg-[var(--color-glow)] hover:text-[#11100e]"
+                      >
+                        {lang === "zh-HK"
+                          ? "填入測試卡 (4242 成功)"
+                          : "Autofill Test Card (4242)"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={autofillDeclineCard}
+                        className="border border-[var(--border-hairline)] px-2.5 py-1 text-[11px] tracking-[0.1em] uppercase text-[var(--text-secondary)] hover:border-[var(--color-error)]"
+                      >
+                        {lang === "zh-HK"
+                          ? "測試拒付卡 (0002)"
+                          : "Test Decline (0002)"}
+                      </button>
+                    </div>
                   </div>
-                )}
 
-                <div className="flex flex-col gap-1.5">
-                  <label htmlFor="cc-name" className="text-xs text-[var(--text-secondary)]">
-                    {lang === "zh-HK" ? "持卡人姓名 *" : "Cardholder Name *"}
-                  </label>
-                  <input
-                    id="cc-name"
-                    type="text"
-                    required
-                    value={cardholderName}
-                    onChange={(e) => setCardholderName(e.target.value)}
-                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 text-sm uppercase"
-                  />
-                </div>
+                  {paymentError && (
+                    <div
+                      role="alert"
+                      className="border-l-4 border-[var(--color-error)] bg-[var(--surface-elevated)] p-3.5 text-xs text-[var(--text-primary)]"
+                    >
+                      {paymentError}
+                    </div>
+                  )}
 
-                <div className="flex flex-col gap-1.5">
-                  <label htmlFor="cc-number" className="text-xs text-[var(--text-secondary)]">
-                    {lang === "zh-HK" ? "信用卡號碼 *" : "Card Number *"}
-                  </label>
-                  <input
-                    id="cc-number"
-                    type="text"
-                    inputMode="numeric"
-                    required
-                    placeholder="4242 4242 4242 4242"
-                    value={cardNumber}
-                    onChange={(e) => setCardNumber(e.target.value)}
-                    className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
                   <div className="flex flex-col gap-1.5">
-                    <label htmlFor="cc-exp" className="text-xs text-[var(--text-secondary)]">
-                      {lang === "zh-HK" ? "到期日 (MM/YY) *" : "Expiry (MM/YY) *"}
+                    <label htmlFor="cc-name" className="text-xs text-[var(--text-secondary)]">
+                      {lang === "zh-HK" ? "持卡人姓名 *" : "Cardholder Name *"}
                     </label>
                     <input
-                      id="cc-exp"
+                      id="cc-name"
                       type="text"
                       required
-                      placeholder="12/29"
-                      value={expiry}
-                      onChange={(e) => setExpiry(e.target.value)}
-                      className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
+                      value={cardholderName}
+                      onChange={(e) => setCardholderName(e.target.value)}
+                      className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 text-sm uppercase"
                     />
                   </div>
+
                   <div className="flex flex-col gap-1.5">
-                    <label htmlFor="cc-cvc" className="text-xs text-[var(--text-secondary)]">
-                      {lang === "zh-HK" ? "安全碼 (CVC) *" : "Security Code (CVC) *"}
+                    <label htmlFor="cc-number" className="text-xs text-[var(--text-secondary)]">
+                      {lang === "zh-HK" ? "信用卡號碼 *" : "Card Number *"}
                     </label>
                     <input
-                      id="cc-cvc"
+                      id="cc-number"
                       type="text"
                       inputMode="numeric"
                       required
-                      placeholder="888"
-                      value={cvc}
-                      onChange={(e) => setCvc(e.target.value)}
+                      placeholder="4242 4242 4242 4242"
+                      value={cardNumber}
+                      onChange={(e) => setCardNumber(e.target.value)}
                       className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
                     />
                   </div>
-                </div>
 
-                <button
-                  type="submit"
-                  disabled={paying}
-                  className="w-full bg-[var(--color-glow)] py-4 text-xs font-semibold tracking-[0.22em] uppercase text-[#11100e] transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  {paying
-                    ? lang === "zh-HK"
-                      ? "正在授權並確認付款..."
-                      : "Authorizing & Settling Order..."
-                    : lang === "zh-HK"
-                      ? `立即授權付款 ${formatMoney(order.total_cents, order.currency)}`
-                      : `Pay ${formatMoney(order.total_cents, order.currency)} Now`}
-                </button>
-              </form>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="flex flex-col gap-1.5">
+                      <label htmlFor="cc-exp" className="text-xs text-[var(--text-secondary)]">
+                        {lang === "zh-HK" ? "到期日 (MM/YY) *" : "Expiry (MM/YY) *"}
+                      </label>
+                      <input
+                        id="cc-exp"
+                        type="text"
+                        required
+                        placeholder="12/29"
+                        value={expiry}
+                        onChange={(e) => setExpiry(e.target.value)}
+                        className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label htmlFor="cc-cvc" className="text-xs text-[var(--text-secondary)]">
+                        {lang === "zh-HK" ? "安全碼 (CVC) *" : "Security Code (CVC) *"}
+                      </label>
+                      <input
+                        id="cc-cvc"
+                        type="text"
+                        inputMode="numeric"
+                        required
+                        placeholder="888"
+                        value={cvc}
+                        onChange={(e) => setCvc(e.target.value)}
+                        className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={paying}
+                    className="w-full bg-[var(--color-glow)] py-4 text-xs font-semibold tracking-[0.22em] uppercase text-[#11100e] transition-opacity hover:opacity-90 disabled:opacity-50"
+                  >
+                    {paying
+                      ? lang === "zh-HK"
+                        ? "正在授權並確認付款..."
+                        : "Authorizing & Settling Order..."
+                      : lang === "zh-HK"
+                        ? `立即授權付款 ${formatMoney(order.total_cents, order.currency)}`
+                        : `Pay ${formatMoney(order.total_cents, order.currency)} Now`}
+                  </button>
+                </form>
+                )}
+              </div>
             )}
 
-            {/* CASE 3: RESERVED + FPS -> HK FPS Instructions & Reference Submission */}
+            {/* CASE 3: RESERVED + FPS -> HK FPS Instructions & Reference Submission (FPS-01 configurable) */}
             {isReserved && order.payment_method === "fps" && (
               <div className="no-print mt-8 space-y-6">
                 <div className="border border-[var(--border-hairline)] bg-[var(--surface-elevated)] p-5">
@@ -526,13 +717,21 @@ export default function CheckoutSettlementClient({
                       : "Transfer the exact amount below via your Hong Kong banking app with your Order Reference in the remarks, then submit your bank transfer reference number below."}
                   </p>
 
-                  <dl className="mt-4 grid grid-cols-1 gap-3 border-t border-[var(--border-hairline)] pt-4 text-xs sm:grid-cols-3">
+                  <dl className="mt-4 grid grid-cols-1 gap-3 border-t border-[var(--border-hairline)] pt-4 text-xs sm:grid-cols-2">
                     <div>
                       <dt className="text-[var(--text-secondary)]">
-                        {lang === "zh-HK" ? "FPS 識別碼 (FPS ID)" : "Merchant FPS ID"}
+                        {lang === "zh-HK" ? "轉數快識別碼" : "Merchant FPS ID"}
                       </dt>
                       <dd className="tabular-nums mt-1 font-mono text-sm font-semibold">
-                        10849201
+                        {displayFpsId}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[var(--text-secondary)]">
+                        {lang === "zh-HK" ? "收款帳戶名稱" : "FPS Account Name"}
+                      </dt>
+                      <dd className="mt-1 font-sans text-sm font-semibold">
+                        {displayFpsAccount}
                       </dd>
                     </div>
                     <div>
@@ -552,6 +751,20 @@ export default function CheckoutSettlementClient({
                       </dd>
                     </div>
                   </dl>
+
+                  {fpsQrUrl && (
+                    <div className="mt-4 border-t border-[var(--border-hairline)] pt-4">
+                      <p className="text-[11px] tracking-[0.14em] uppercase text-[var(--text-secondary)]">
+                        {lang === "zh-HK" ? "掃描轉數快二維碼" : "Scan FPS QR Code"}
+                      </p>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={fpsQrUrl}
+                        alt="FPS QR Code"
+                        className="mt-2 h-40 w-40 border border-[var(--border-hairline)] bg-white object-contain p-2"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {paymentError && (
@@ -621,16 +834,43 @@ export default function CheckoutSettlementClient({
                   type="button"
                   disabled={cancelling}
                   onClick={handleCancelHold}
-                  className="text-[var(--color-error)] underline hover:opacity-80"
+                  className="border border-[var(--border-hairline)] px-3.5 py-1.5 text-xs uppercase text-[var(--text-secondary)] hover:border-[var(--color-error)] hover:text-[var(--color-error)]"
                 >
-                  {lang === "zh-HK" ? "取消留貨並釋放存倉" : "Cancel Hold & Release Stock"}
+                  {cancelling
+                    ? lang === "zh-HK"
+                      ? "取消中..."
+                      : "Cancelling..."
+                    : lang === "zh-HK"
+                      ? "取消留貨並釋放配額"
+                      : "Cancel Hold & Release Stock"}
                 </button>
+              </div>
+            )}
+
+            {/* CASE 4: EXPIRED OR CANCELLED */}
+            {(order.status === "expired" || order.status === "cancelled") && (
+              <div className="mt-8 space-y-4 border border-[var(--border-hairline)] bg-[var(--surface-elevated)] p-6">
+                <p className="text-sm font-medium">
+                  {order.status === "expired"
+                    ? lang === "zh-HK"
+                      ? "此留貨訂單已逾時，鎖定配額已自動釋放回香港存倉。"
+                      : "This reservation hold has expired and its units have been returned to the saleable vault."
+                    : lang === "zh-HK"
+                      ? "此留貨訂單已取消，鎖定配額已釋放回香港存倉。"
+                      : "This reservation hold has been cancelled and its units have been returned to the saleable vault."}
+                </p>
+                <Link
+                  href={`/${lang}/products/${order.product_slug}`}
+                  className="inline-block bg-[var(--text-primary)] px-6 py-3 text-xs tracking-[0.18em] uppercase text-[var(--surface-page)]"
+                >
+                  {lang === "zh-HK" ? "重新選購作品 →" : "Reserve Piece Again →"}
+                </Link>
               </div>
             )}
           </div>
         </div>
 
-        {/* Right Column: Order Summary Card */}
+        {/* Right Column: Order Summary Card (All Cart Line Items) */}
         <div className="lg:col-span-5">
           <div className="card-exhibition p-6 sm:p-8">
             <p className="text-[11px] tracking-[0.2em] uppercase text-[var(--text-secondary)]">
@@ -640,37 +880,49 @@ export default function CheckoutSettlementClient({
               {order.order_code}
             </p>
 
-            {product && (
-              <div className="mt-5 flex gap-4 border-y border-[var(--border-hairline)] py-5">
-                <div className="w-24 shrink-0">
-                  <LampStage
-                    hue={product.art_hue}
-                    variant={product.art_variant}
-                    lit={lit}
-                    imageDayUrl={product.image_day_url}
-                    imageLitUrl={product.image_lit_url}
-                    aspectClass="aspect-square"
-                  />
+            <div className="mt-5 divide-y divide-[var(--border-hairline)] border-y border-[var(--border-hairline)]">
+              {enrichedItems.map((it) => (
+                <div key={it.product_slug} className="flex gap-4 py-4">
+                  {it.product && (
+                    <div className="w-20 shrink-0">
+                      <LampStage
+                        hue={it.product.art_hue}
+                        variant={it.product.art_variant}
+                        lit={lit}
+                        imageDayUrl={it.product.image_day_url}
+                        imageLitUrl={it.product.image_lit_url}
+                        aspectClass="aspect-square"
+                        compact
+                      />
+                    </div>
+                  )}
+                  <div className="flex flex-1 flex-col justify-center">
+                    {it.badge && (
+                      <p className="text-[10px] tracking-[0.16em] uppercase text-[var(--text-secondary)]">
+                        {it.badge}
+                      </p>
+                    )}
+                    <h3 className="mt-0.5 font-display text-base">{it.title}</h3>
+                    <div className="mt-1 flex items-baseline justify-between text-xs text-[var(--text-secondary)]">
+                      <span className="tabular-nums">
+                        {formatMoney(it.unit_price_cents, order.currency)} ×{" "}
+                        {it.quantity}
+                      </span>
+                      <span className="tabular-nums font-medium text-[var(--text-primary)]">
+                        {formatMoney(it.line_total_cents, order.currency)}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-                <div className="flex flex-col justify-center">
-                  <p className="text-[10px] tracking-[0.16em] uppercase text-[var(--text-secondary)]">
-                    {editionBadge}
-                  </p>
-                  <h3 className="mt-1 font-display text-lg">{productTitle}</h3>
-                  <p className="tabular-nums mt-1 text-xs text-[var(--text-secondary)]">
-                    {formatMoney(order.unit_price_cents, order.currency)} ×{" "}
-                    {order.quantity}
-                  </p>
-                </div>
-              </div>
-            )}
+              ))}
+            </div>
 
             <dl className="mt-5 space-y-3 text-xs">
               <div className="flex justify-between">
                 <dt className="text-[var(--text-secondary)]">
                   {lang === "zh-HK" ? "香港專人送遞" : "Hong Kong Delivery"}
                 </dt>
-                <dd>{lang === "zh-HK" ? "免費 (Complimentary)" : "Complimentary"}</dd>
+                <dd>{lang === "zh-HK" ? "免費送遞" : "Complimentary"}</dd>
               </div>
               {order.fps_reference && (
                 <div className="flex justify-between">

@@ -944,7 +944,7 @@ mod tests {
             crud_request(
                 "PUT",
                 "/api/admin/settings/brand.name",
-                r#"{"value":"HVILE"}"#,
+                r#"{"value":"ATELIER"}"#,
             ),
             StatusCode::SERVICE_UNAVAILABLE,
             DB_GATE,
@@ -1014,7 +1014,7 @@ mod tests {
             ),
             (
                 r#"{"slug":"ph-5","brand":"B","model":"M","price_cents":1,"family":"","art_variant":"orb","art_hue":1,"active":true}"#,
-                r#"{"error":"art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\""}"#,
+                r#"{"error":"art_variant must be one of \"dome\", \"shades\", \"shades-tall\", \"piano\", \"none\""}"#,
             ),
             (
                 r#"{"slug":"ph-5","brand":"B","model":"M","price_cents":1,"family":"","art_variant":"dome","art_hue":360,"active":true}"#,
@@ -1325,7 +1325,7 @@ mod tests {
                     .uri("/api/admin/settings/brand.name")
                     .header("content-type", "application/json")
                     .header("cookie", test_session_cookie())
-                    .body(Body::from(r#"{"value":"HVILE"}"#.to_string()))
+                    .body(Body::from(r#"{"value":"ATELIER"}"#.to_string()))
                     .unwrap(),
             )
             .await

@@ -922,3 +922,117 @@ fn release_cancels_a_reservation_and_frees_its_units() {
     );
     assert_eq!(stock(&db, WEBHOOK_SLUG), (5, 0, 0), "no stock is consumed");
 }
+
+// ---------------------------------------------------------------------------
+// 7. Multi-SKU Shopping Cart atomic reservation, settlement & release (CART-01)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multi_sku_shopping_cart_reserves_settles_and_releases_all_items_atomically() {
+    let Some(url) = common::scratch_db_url() else {
+        return;
+    };
+    let db = ScratchDb::new(&url, "orders_multi_sku_cart");
+    db.apply_migrations();
+    let (router, cookie) = boot_orders(&db);
+
+    // Reserve ALL 8 SKUs in one Shopping Cart transaction (CART-01).
+    let all_skus = [
+        ("panthella-160-v3-beige", 1, 161_500_i64),
+        ("panthella-160-v3-white-opal", 2, 161_500_i64),
+        ("panthella-160-v3-opal-beige-chrome", 1, 238_000_i64),
+        ("panthella-160-v3-opal-pale-blue", 1, 161_500_i64),
+        ("panthella-160-v3-opal-pale-rose", 1, 161_500_i64),
+        ("ph-2-1-table-chrome", 2, 714_000_i64),
+        ("ph-3-2-table-chrome", 1, 1_037_000_i64),
+        ("ph-1-1-piano-table-limited", 1, 1_079_500_i64),
+    ];
+    let expected_total_cents: i64 = all_skus
+        .iter()
+        .map(|(_, qty, price)| i64::from(*qty) * *price)
+        .sum();
+    let expected_total_qty: i32 = all_skus.iter().map(|(_, qty, _)| *qty).sum();
+
+    let items_json: Vec<Value> = all_skus
+        .iter()
+        .map(|(slug, qty, _)| json!({ "slug": slug, "quantity": qty }))
+        .collect();
+
+    let body = json!({
+        "items": items_json,
+        "payment_method": "card",
+        "customer_name": CUSTOMER_NAME,
+        "customer_email": CUSTOMER_EMAIL,
+        "customer_phone": "+852 9000 0000",
+        "delivery_address": "10 Queen's Road Central",
+    })
+    .to_string();
+
+    let (status, resp_body) = call(
+        &db,
+        &router,
+        json_request(Method::POST, "/api/orders/reserve", &body),
+    );
+    assert_eq!(status, StatusCode::OK, "{resp_body}");
+    let order: Value = serde_json::from_str(&resp_body).expect("must be JSON");
+    assert_eq!(order["total_cents"], json!(expected_total_cents));
+    assert_eq!(order["quantity"], json!(expected_total_qty));
+    assert_eq!(order["items"].as_array().unwrap().len(), 8);
+
+    // Every one of the 8 SKUs now has its reserved count bumped in Postgres.
+    for (slug, qty, _) in &all_skus {
+        let (_, reserved, _) = stock(&db, slug);
+        assert_eq!(reserved, *qty, "reserved count for {slug}");
+    }
+
+    // Settle the 8-SKU cart via verified Stripe webhook: all 8 SKUs consume stock.
+    let order_code = order["order_code"].as_str().unwrap().to_string();
+    let currency = order["currency"].as_str().unwrap().to_string();
+    let (status, wh_body) = stripe_event(
+        &db,
+        &router,
+        "evt_multi_8_skus",
+        &order_code,
+        expected_total_cents,
+        &currency,
+    );
+    assert_eq!(status, StatusCode::OK, "{wh_body}");
+    for (slug, _, _) in &all_skus {
+        let (_, reserved, _) = stock(&db, slug);
+        assert_eq!(reserved, 0, "reserved consumed for {slug}");
+    }
+
+    // Also verify releasing a 2-SKU cart frees both SKUs atomically.
+    let two_sku_body = json!({
+        "items": [
+            { "slug": "panthella-160-v3-beige", "quantity": 1 },
+            { "slug": "ph-2-1-table-chrome", "quantity": 1 }
+        ],
+        "payment_method": "fps",
+        "customer_name": CUSTOMER_NAME,
+        "customer_email": CUSTOMER_EMAIL,
+    })
+    .to_string();
+    let (status, resp2) = call(
+        &db,
+        &router,
+        json_request(Method::POST, "/api/orders/reserve", &two_sku_body),
+    );
+    assert_eq!(status, StatusCode::OK, "{resp2}");
+    let order2: Value = serde_json::from_str(&resp2).unwrap();
+    let order2_id = order2["id"].as_i64().unwrap();
+    assert_eq!(stock(&db, "panthella-160-v3-beige"), (1, 1, 0));
+    assert_eq!(stock(&db, "ph-2-1-table-chrome"), (1, 1, 0));
+
+    let (status, rel_body) = admin_call(
+        &db,
+        &router,
+        &cookie,
+        Method::POST,
+        &format!("/api/admin/orders/{order2_id}/release"),
+        "",
+    );
+    assert_eq!(status, StatusCode::OK, "{rel_body}");
+    assert_eq!(stock(&db, "panthella-160-v3-beige"), (1, 0, 0));
+    assert_eq!(stock(&db, "ph-2-1-table-chrome"), (1, 0, 0));
+}

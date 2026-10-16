@@ -14,6 +14,7 @@ interface LampStageProps {
   mode?: "photo" | "scale";
   aspectClass?: string;
   altText?: string;
+  compact?: boolean;
 }
 
 function ArchitecturalSilhouette({
@@ -145,6 +146,7 @@ export default function LampStage({
   mode = "photo",
   aspectClass = "aspect-[4/5]",
   altText,
+  compact = false,
 }: LampStageProps) {
   const [dayImgFailed, setDayImgFailed] = useState(false);
   const [litImgFailed, setLitImgFailed] = useState(false);
@@ -154,11 +156,16 @@ export default function LampStage({
   const validLitUrl =
     !litImgFailed && imageLitUrl.trim() !== "" ? imageLitUrl.trim() : "";
 
+  // MEDIA-01: when both day & lit photos are configured, toggling 5500K <-> 2700K
+  // renders the lit effect (cross-fade when URLs differ, plus 2700K radial bloom).
+  // When only a single photo is uploaded (image_day_url only, image_lit_url blank),
+  // render it as a clean plain image without artificial warm tinting or bloom.
+  const hasLitEffect = validDayUrl !== "" && validLitUrl !== "";
   const primaryDay = validDayUrl || validLitUrl;
   const primaryLit = validLitUrl || validDayUrl;
   const showPhotos = mode === "photo" && primaryDay !== "";
   const canCrossFade =
-    primaryDay !== "" && primaryLit !== "" && primaryDay !== primaryLit;
+    hasLitEffect && primaryDay !== "" && primaryLit !== "" && primaryDay !== primaryLit;
 
   return (
     <div
@@ -173,17 +180,17 @@ export default function LampStage({
         className="pointer-events-none absolute inset-x-0 bottom-0 h-[22%] border-t border-[var(--border-hairline)] opacity-50"
       />
 
-      {/* 2700K radial light bloom when lit */}
+      {/* 2700K radial light bloom when lit (only for dual-photo / silhouette items) */}
       <div
         aria-hidden="true"
         className={`halo-2700k pointer-events-none absolute inset-0 ${
-          lit ? "opacity-100" : "opacity-0"
+          lit && (!showPhotos || hasLitEffect) ? "opacity-100" : "opacity-0"
         }`}
       />
 
       {showPhotos ? (
         <>
-          {/* Daylight sculptural cutout */}
+          {/* Daylight sculptural cutout / plain photograph */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={primaryDay}
@@ -191,7 +198,9 @@ export default function LampStage({
             loading="eager"
             decoding="sync"
             onError={() => setDayImgFailed(true)}
-            className={`absolute inset-0 h-full w-full object-contain p-7 transition-all duration-700 ease-out group-hover:scale-[1.03] ${
+            className={`absolute inset-0 h-full w-full object-contain ${
+              compact ? "p-2" : "p-7"
+            } transition-all duration-700 ease-out group-hover:scale-[1.03] ${
               canCrossFade && lit ? "opacity-0" : "opacity-100"
             }`}
           />
@@ -205,27 +214,31 @@ export default function LampStage({
                 loading="eager"
                 decoding="sync"
                 onError={() => setLitImgFailed(true)}
-                className={`absolute inset-0 h-full w-full object-contain p-7 transition-all duration-700 ease-out group-hover:scale-[1.03] ${
+                className={`absolute inset-0 h-full w-full object-contain ${
+                  compact ? "p-2" : "p-7"
+                } transition-all duration-700 ease-out group-hover:scale-[1.03] ${
                   lit ? "opacity-100" : "opacity-0"
                 }`}
               />
             </>
           )}
-          <div
-            aria-hidden="true"
-            className={`warm-photo-cast pointer-events-none absolute inset-0 ${
-              lit ? "opacity-100" : "opacity-0"
-            }`}
-          />
+          {hasLitEffect && (
+            <div
+              aria-hidden="true"
+              className={`warm-photo-cast pointer-events-none absolute inset-0 ${
+                lit ? "opacity-100" : "opacity-0"
+              }`}
+            />
+          )}
         </>
-      ) : (
+      ) : variant !== "none" ? (
         <ArchitecturalSilhouette
           variant={variant}
           lit={lit}
           blueprint={mode === "scale"}
           dimensionsText={dimensionsText}
         />
-      )}
+      ) : null}
 
       {/* Top-left numbered edition badge */}
       {badgeText && (
@@ -235,16 +248,18 @@ export default function LampStage({
       )}
 
       {/* Top-right live Kelvin state indicator */}
-      <div className="pointer-events-none absolute right-3.5 top-3.5 z-10 flex items-center gap-1.5 px-2 py-1 text-[10px] tracking-[0.16em] uppercase text-[var(--text-secondary)]">
-        <span
-          className={`inline-block size-2 rounded-full transition-all duration-500 ${
-            lit
-              ? "bg-[var(--color-glow)] shadow-[0_0_8px_var(--color-glow)]"
-              : "border border-[var(--text-secondary)] bg-transparent"
-          }`}
-        />
-        <span>{mode === "scale" ? "1:10 CAD" : lit ? "2700K" : "5500K"}</span>
-      </div>
+      {!compact && (!showPhotos || hasLitEffect) && variant !== "none" && (
+        <div className="pointer-events-none absolute right-3.5 top-3.5 z-10 flex items-center gap-1.5 px-2 py-1 text-[10px] tracking-[0.16em] uppercase text-[var(--text-secondary)]">
+          <span
+            className={`inline-block size-2 rounded-full transition-all duration-500 ${
+              lit
+                ? "bg-[var(--color-glow)] shadow-[0_0_8px_var(--color-glow)]"
+                : "border border-[var(--text-secondary)] bg-transparent"
+            }`}
+          />
+          <span>{mode === "scale" ? "1:10 CAD" : lit ? "2700K" : "5500K"}</span>
+        </div>
+      )}
     </div>
   );
 }

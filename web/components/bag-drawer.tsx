@@ -65,6 +65,10 @@ export default function BagDrawer({
     setErrorMsg(null);
 
     try {
+      const itemsPayload = populatedItems.map((i) => ({
+        slug: i.slug,
+        quantity: i.quantity,
+      }));
       const primary = populatedItems[0]!;
       const res = await fetch("/api/orders/reserve", {
         method: "POST",
@@ -72,6 +76,7 @@ export default function BagDrawer({
         body: JSON.stringify({
           slug: primary.slug,
           quantity: primary.quantity,
+          items: itemsPayload,
           payment_method: paymentMethod,
           customer_name: customerName.trim(),
           customer_email: customerEmail.trim(),
@@ -83,6 +88,7 @@ export default function BagDrawer({
 
       const data = (await res.json().catch(() => ({}))) as {
         order_code?: string;
+        stripe_checkout_url?: string | null;
         error?: string;
       };
 
@@ -91,14 +97,14 @@ export default function BagDrawer({
           data.error ??
             (lang === "zh-HK"
               ? "未能建立留貨訂單，請檢查存倉數量或輸入資料。"
-              : "Could not reserve piece. Please verify stock availability and your details."),
+              : "Could not reserve items. Please verify stock availability and your details."),
         );
         await refreshStock();
         return;
       }
 
-      // Remove reserved item from bag and navigate straight to payment settlement page
-      removeFromBag(primary.slug);
+      // Clear all reserved cart items and navigate straight to payment settlement page
+      clearBag();
       setCheckoutStep(false);
       setBagOpen(false);
       await refreshStock();
@@ -231,6 +237,7 @@ export default function BagDrawer({
                         imageDayUrl={product.image_day_url}
                         imageLitUrl={product.image_lit_url}
                         aspectClass="aspect-square"
+                        compact
                       />
                     </div>
                     <div className="flex flex-1 flex-col justify-between">
@@ -250,7 +257,7 @@ export default function BagDrawer({
                         <button
                           type="button"
                           onClick={() => removeFromBag(slug)}
-                          className="text-xs text-[var(--text-secondary)] hover:text-[var(--color-error)]"
+                          className="shrink-0 whitespace-nowrap text-xs text-[var(--text-secondary)] hover:text-[var(--color-error)]"
                         >
                           {lang === "zh-HK" ? "移除" : "Remove"}
                         </button>
@@ -300,7 +307,7 @@ export default function BagDrawer({
                 onClick={() => setCheckoutStep(false)}
                 className="self-start text-xs text-[var(--text-secondary)] underline"
               >
-                ← {lang === "zh-HK" ? "返回購物袋清單" : "Back to bag items"}
+                ← {lang === "zh-HK" ? "返回購物車清單" : "Back to cart items"}
               </button>
 
               {errorMsg && (

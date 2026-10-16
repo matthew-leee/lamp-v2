@@ -1,6 +1,10 @@
 import { revalidatePath } from "next/cache";
 import { getApiBaseUrl, loadStorefrontData } from "@/lib/api";
-import { buildOrderEmailHtml } from "@/lib/email-receipt";
+import {
+  buildOrderEmailHtml,
+  dispatchTransactionalEmail,
+  type EmailOrderItemSummary,
+} from "@/lib/email-receipt";
 import { formatProductTitle } from "@/lib/format";
 import { isLocale, type Locale } from "@/lib/i18n";
 
@@ -26,8 +30,9 @@ export async function POST(request: Request): Promise<Response> {
       cache: "no-store",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        slug: body.slug,
+        slug: body.slug ?? "",
         quantity: body.quantity ?? 1,
+        items: Array.isArray(body.items) ? body.items : [],
         payment_method: body.payment_method,
         customer_name: body.customer_name,
         customer_email: body.customer_email,
@@ -46,15 +51,40 @@ export async function POST(request: Request): Promise<Response> {
 
     revalidatePath("/", "layout");
 
-    // Build transactional email receipt preview
+    // Build transactional email receipt preview & dispatch live email (EMAIL-01)
     let emailReceipt: { subject: string; html: string } | null = null;
     try {
       const { catalogue, config } = await loadStorefrontData();
+      const rawItems = Array.isArray(data.items)
+        ? (data.items as Array<{
+            product_slug: string;
+            quantity: number;
+            unit_price_cents: number;
+            line_total_cents: number;
+          }>)
+        : [];
+
+      const itemSummaries: EmailOrderItemSummary[] = rawItems.map((it) => {
+        const p = catalogue.products.find((cp) => cp.slug === it.product_slug);
+        const copy = p?.content[locale] ?? {};
+        const title = p
+          ? formatProductTitle(p.model, copy.model_alt, copy.colourway, locale)
+          : it.product_slug;
+        return {
+          productTitle: title,
+          productSlug: it.product_slug,
+          quantity: Number(it.quantity ?? 1),
+          unitPriceCents: Number(it.unit_price_cents ?? 0),
+          lineTotalCents: Number(it.line_total_cents ?? 0),
+        };
+      });
+
       const prod = catalogue.products.find((p) => p.slug === data.product_slug);
       const copy = prod?.content[locale] ?? {};
       const title = prod
         ? formatProductTitle(prod.model, copy.model_alt, copy.colourway, locale)
         : String(data.product_slug ?? "");
+
       emailReceipt = buildOrderEmailHtml({
         orderCode: String(data.order_code ?? ""),
         status: String(data.status ?? "reserved"),
@@ -65,6 +95,7 @@ export async function POST(request: Request): Promise<Response> {
         unitPriceCents: Number(data.unit_price_cents ?? 0),
         totalCents: Number(data.total_cents ?? 0),
         currency: String(data.currency ?? config.currency),
+        items: itemSummaries,
         customerName: String(data.customer_name ?? ""),
         customerEmail: String(data.customer_email ?? ""),
         expiresAt: String(data.expires_at ?? ""),
@@ -73,8 +104,15 @@ export async function POST(request: Request): Promise<Response> {
         siteUrl: config.siteUrl,
         locale,
       });
+
+      await dispatchTransactionalEmail({
+        to: String(data.customer_email ?? ""),
+        subject: emailReceipt.subject,
+        html: emailReceipt.html,
+        brandName: config.brandName,
+      });
     } catch {
-      // Non-fatal if storefront metadata lookup fails
+      // Non-fatal if storefront metadata lookup or SMTP fails
     }
 
     return Response.json(
