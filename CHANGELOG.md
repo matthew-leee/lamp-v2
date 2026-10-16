@@ -2,6 +2,9 @@
 
 ## [Unreleased] — v2 Clean-Room Flagship & Operator Studio
 
+### Fixed
+- **Stripe Dynamic Payment Methods Compatibility (`STRIPE-01`)**: Removed the deprecated `payment_method_types[0]=card` parameter from `POST /v1/checkout/sessions` in `web/app/api/orders/[code]/pay-card/route.ts` so Stripe accounts on newer API versions using dashboard-managed Dynamic Payment Methods create hosted Checkout Sessions (`cs_test_...`) without error.
+
 ### Added & Updated (P1–P4 Milestones)
 - **Multi-SKU Shopping Cart (`CART-01`)**:
   - Renamed all storefront terminology from "Shopping Bag" to **Shopping Cart / Cart (`購物車` / `加入購物車`)**.

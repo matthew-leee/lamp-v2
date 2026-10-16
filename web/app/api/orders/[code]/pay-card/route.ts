@@ -202,7 +202,6 @@ export async function POST(
 
       const form = new URLSearchParams();
       form.set("mode", "payment");
-      form.set("payment_method_types[0]", "card");
       form.set("client_reference_id", order.order_code);
       form.set("metadata[order_code]", order.order_code);
       form.set(
@@ -237,7 +236,7 @@ export async function POST(
         headers: {
           Authorization: `Bearer ${stripeSecretKey}`,
           "Content-Type": "application/x-www-form-urlencoded",
-          "Idempotency-Key": `checkout_session_${order.order_code}`,
+          "Idempotency-Key": `checkout_session_v2_${order.order_code}`,
         },
         body: form.toString(),
       });
