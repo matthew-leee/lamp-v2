@@ -1,5 +1,5 @@
 # Multi-stage production Dockerfile for the Rust API (OPS-01, BUDGET-01).
-FROM rust:1.85-bookworm AS builder
+FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./

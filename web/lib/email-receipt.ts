@@ -241,10 +241,12 @@ export async function dispatchTransactionalEmail(opts: {
     }
   }
 
-  // 2. Direct SMTPS (465) or STARTTLS (587) transport when SMTP_HOST, SMTP_USER, SMTP_PASS are set
-  const smtpHost = process.env.SMTP_HOST?.trim();
+  // 2. Direct SMTPS (465) or STARTTLS (587) transport when SMTP_USER and SMTP_PASS are set
   const smtpUser = process.env.SMTP_USER?.trim();
   const smtpPass = process.env.SMTP_PASS?.trim();
+  const smtpHost =
+    process.env.SMTP_HOST?.trim() ||
+    (smtpUser && smtpPass ? "smtp.gmail.com" : "");
   const smtpPort = Number.parseInt(process.env.SMTP_PORT?.trim() || "465", 10);
 
   if (smtpHost && smtpUser && smtpPass) {

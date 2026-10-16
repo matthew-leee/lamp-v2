@@ -191,6 +191,15 @@ export async function POST(
               },
             ];
 
+      const proto =
+        request.headers.get("x-forwarded-proto") ??
+        new URL(request.url).protocol.replace(":", "");
+      const host =
+        request.headers.get("x-forwarded-host") ??
+        request.headers.get("host") ??
+        "";
+      const publicOrigin = host ? `${proto}://${host}` : config.siteUrl;
+
       const form = new URLSearchParams();
       form.set("mode", "payment");
       form.set("payment_method_types[0]", "card");
@@ -198,11 +207,11 @@ export async function POST(
       form.set("metadata[order_code]", order.order_code);
       form.set(
         "success_url",
-        `${config.siteUrl}/${locale}/checkout/${encodeURIComponent(order.order_code)}?session_id={CHECKOUT_SESSION_ID}`,
+        `${publicOrigin}/${locale}/checkout/${encodeURIComponent(order.order_code)}?session_id={CHECKOUT_SESSION_ID}`,
       );
       form.set(
         "cancel_url",
-        `${config.siteUrl}/${locale}/checkout/${encodeURIComponent(order.order_code)}`,
+        `${publicOrigin}/${locale}/checkout/${encodeURIComponent(order.order_code)}`,
       );
 
       rawItems.forEach((it, idx) => {

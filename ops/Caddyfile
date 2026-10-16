@@ -1,5 +1,5 @@
 # Reverse proxy and automatic HTTPS for the storefront & API (OPS-01).
-{$SITE_DOMAIN:localhost} {
+{$SITE_DOMAIN:localhost}, :80 {
     encode zstd gzip
 
     # Stripe webhook & API health probes go straight to the Rust API.
