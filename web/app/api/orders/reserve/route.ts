@@ -111,8 +111,8 @@ export async function POST(request: Request): Promise<Response> {
         html: emailReceipt.html,
         brandName: config.brandName,
       });
-    } catch {
-      // Non-fatal if storefront metadata lookup or SMTP fails
+    } catch (err) {
+      console.error("[reserve/route] Email dispatch error:", err);
     }
 
     return Response.json(

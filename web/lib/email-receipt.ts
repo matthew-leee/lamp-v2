@@ -247,13 +247,13 @@ export async function dispatchTransactionalEmail(opts: {
   const smtpHost =
     process.env.SMTP_HOST?.trim() ||
     (smtpUser && smtpPass ? "smtp.gmail.com" : "");
-  const smtpPort = Number.parseInt(process.env.SMTP_PORT?.trim() || "465", 10);
+  const smtpPort = Number.parseInt(process.env.SMTP_PORT?.trim() || "587", 10);
 
   if (smtpHost && smtpUser && smtpPass) {
     try {
       await sendViaSmtp({
         host: smtpHost,
-        port: Number.isFinite(smtpPort) ? smtpPort : 465,
+        port: Number.isFinite(smtpPort) ? smtpPort : 587,
         user: smtpUser,
         pass: smtpPass,
         fromEmail,
@@ -262,12 +262,19 @@ export async function dispatchTransactionalEmail(opts: {
         subject: opts.subject,
         html: opts.html,
       });
+      console.log(
+        `[email-receipt] Dispatched email via SMTP (${smtpHost}:${smtpPort}) to ${recipient} — Subject: ${opts.subject}`,
+      );
       return { dispatched: true, transport: "smtp" };
     } catch (err) {
+      const msg = err instanceof Error ? err.message : "SMTP error";
+      console.error(
+        `[email-receipt] SMTP delivery failed (${smtpHost}:${smtpPort}) to ${recipient}: ${msg}`,
+      );
       return {
         dispatched: false,
         transport: "smtp",
-        detail: err instanceof Error ? err.message : "SMTP error",
+        detail: msg,
       };
     }
   }

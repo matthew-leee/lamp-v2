@@ -106,8 +106,8 @@ async function sendPaidConfirmationIfSettled(opts: {
       html: receipt.html,
       brandName: config.brandName,
     });
-  } catch {
-    // Non-fatal
+  } catch (err) {
+    console.error("[pay-card/route] Paid confirmation email error:", err);
   }
 }
 

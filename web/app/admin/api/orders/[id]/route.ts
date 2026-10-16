@@ -149,8 +149,8 @@ export async function POST(
           html: receipt.html,
           brandName: config.brandName,
         });
-      } catch {
-        // Non-fatal
+      } catch (err) {
+        console.error("[admin/orders] FPS confirmation email error:", err);
       }
     }
   }
