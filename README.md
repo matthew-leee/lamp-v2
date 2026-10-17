@@ -29,6 +29,24 @@ The full Docker Compose stack (`db`, `api`, `web`, `caddy`, `cloudflared`) runs 
 - **Automatic Let's Encrypt HTTPS (`sslip.io`)**: `https://89-167-15-159.sslip.io`
 - **Cloudflare Tunnel (`cloudflared`)**: forwards `http://caddy:8080` to a public `*.trycloudflare.com` HTTPS endpoint (compatible with NordVPN without needing Tailscale).
 
+### One-Line VPS & Git Auto-Deploy CLI (`scripts/vps.mjs`)
+
+`scripts/vps.mjs` reads `HETZNER_VPS_PASSPHRASE` from `.env` automatically and provides a single-command workflow for Git-backed auto-deploy, remote log inspection, and database resets:
+
+```bash
+# Push current Git HEAD to /opt/storefront-v2.git on VPS & auto-rebuild via post-receive hook
+node scripts/vps.mjs deploy
+
+# Inspect container status, health, and active Cloudflare Tunnel URL
+node scripts/vps.mjs status
+
+# Tail live container logs (e.g. web, api, [email-receipt]) without manual SSH
+node scripts/vps.mjs logs web
+
+# Reset VPS database to the pristine 8 SKUs / 16 units / 0 orders baseline
+node scripts/vps.mjs reset-db
+```
+
 ## Development & Verification
 
 ```bash

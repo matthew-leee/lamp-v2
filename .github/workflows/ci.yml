@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "v2-flagship"]
+    branches: ["main", "v2-clean-room", "v2-flagship"]
   pull_request:
 
 jobs:
@@ -65,7 +65,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Apply migrations 0001..0006
+      - name: Apply migrations 0001..0007
         run: |
           for f in api/migrations/000*.sql; do
             PGPASSWORD=verify-only psql -h 127.0.0.1 -p 55432 -U ci_user -d storefront_verify -v ON_ERROR_STOP=1 -f "$f"

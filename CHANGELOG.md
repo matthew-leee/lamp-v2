@@ -3,6 +3,7 @@
 ## [Unreleased] — v2 Clean-Room Flagship & Operator Studio
 
 ### Fixed
+- **One-Line VPS Operations & Git Push Auto-Deploy CLI (`OPS-01`, `DEPLOY-01`)**: Added `scripts/vps.mjs` (`deploy`, `status`, `logs`, `reset-db`, `exec`) with a server-side `/opt/storefront-v2.git` `post-receive` hook so pushing a local commit automatically checks out and rebuilds the Hetzner Docker Compose stack without manual SSH scripts.
 - **Stripe Dynamic Payment Methods Compatibility (`STRIPE-01`)**: Removed the deprecated `payment_method_types[0]=card` parameter from `POST /v1/checkout/sessions` in `web/app/api/orders/[code]/pay-card/route.ts` so Stripe accounts on newer API versions using dashboard-managed Dynamic Payment Methods create hosted Checkout Sessions (`cs_test_...`) without error.
 - **Hetzner SMTP Port 587 STARTTLS, App-Password Normalization & Delivery Logging (`EMAIL-01`)**: Switched default `SMTP_PORT` from `465` (blocked outbound on Hetzner cloud) to `587` (`STARTTLS`), normalized hyphen/space-grouped Google App Passwords (`xxxx-xxxx-xxxx-xxxx`) for `AUTH LOGIN`, and added explicit `[email-receipt]` delivery and error logging in container stdout/stderr.
 
