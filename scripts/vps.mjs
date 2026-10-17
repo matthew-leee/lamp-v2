@@ -149,24 +149,6 @@ withAskPass((childEnv) => {
     if (pushRes.status !== 0) {
       process.exit(pushRes.status ?? 1);
     }
-
-    // Also sync gitignored demo-assets if missing on server
-    const demoDir = path.join(repoRoot, "web", "public", "demo-assets");
-    if (fs.existsSync(demoDir)) {
-      spawnSync(
-        "scp",
-        [
-          "-o",
-          "StrictHostKeyChecking=accept-new",
-          "-i",
-          vpsKey,
-          "-r",
-          demoDir.replace(/\\/g, "/"),
-          `${vpsHost}:/opt/storefront-v2/web/public/`,
-        ],
-        { env: childEnv, stdio: "inherit", timeout: 60000 },
-      );
-    }
   } else if (subcmd === "exec") {
     const cmd = rest.join(" ");
     if (!cmd) {

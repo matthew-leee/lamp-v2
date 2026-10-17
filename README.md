@@ -45,7 +45,12 @@ node scripts/vps.mjs logs web
 
 # Reset VPS database to the pristine 8 SKUs / 16 units / 0 orders baseline
 node scripts/vps.mjs reset-db
+
+# Execute a one-line shell command on the VPS
+node scripts/vps.mjs exec "docker compose ps"
 ```
+
+- **GitHub Repository (`origin`)**: `https://github.com/matthew-leee/lamp-v2.git` (branches `v2-clean-room` and `main`).
 
 ## Development & Verification
 
