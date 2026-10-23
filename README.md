@@ -66,7 +66,7 @@ node scripts/vps.mjs exec "docker compose ps"
 
 ```bash
 # Rust API (port 18080)
-cd api && STOREFRONT_TEST_DATABASE_URL="postgres://storefront:scratch-only@localhost:55433/storefront_scratch" cargo test
+cd api && STOREFRONT_TEST_DATABASE_URL="postgres://hvile:scratch-only@localhost:55433/hvile_scratch" cargo test  # 264 passed
 # Next.js Web (port 3002)
-cd web && npm run lint && npm run typecheck && npm run build && npm test
+cd web && npm run lint && npm run typecheck && npm run build && npm test  # 24 passed
 ```
