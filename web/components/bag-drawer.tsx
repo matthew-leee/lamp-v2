@@ -6,6 +6,12 @@ import { useRouter } from "next/navigation";
 import { useStorefront } from "./storefront-context";
 import LampStage from "./lamp-stage";
 import { formatEditionBadge, formatMoney, formatProductTitle } from "@/lib/format";
+import {
+  clearPendingAttemptKey,
+  getOrCreatePendingAttemptKey,
+  pendingAttemptFingerprint,
+  saveRecentOrder,
+} from "@/lib/recent-order";
 import { t, ui, type Locale } from "@/lib/i18n";
 
 export default function BagDrawer({
@@ -64,6 +70,18 @@ export default function BagDrawer({
     setSubmitting(true);
     setErrorMsg(null);
 
+    // One order per pay tap (findings G01): the DURABLE identity of THIS pay
+    // attempt. The same cart + payment method + email keeps the same
+    // `idempotency_key` across a refresh, a lost-response retry and even a
+    // second browser tab, so the API answers with the FIRST order instead of
+    // a second ghost order holding stock.
+    const attemptFingerprint = pendingAttemptFingerprint(
+      populatedItems.map((i) => ({ slug: i.slug, quantity: i.quantity })),
+      paymentMethod,
+      customerEmail,
+    );
+    const idempotencyKey = getOrCreatePendingAttemptKey(attemptFingerprint);
+
     try {
       const itemsPayload = populatedItems.map((i) => ({
         slug: i.slug,
@@ -83,11 +101,13 @@ export default function BagDrawer({
           customer_phone: customerPhone.trim(),
           delivery_address: deliveryAddress.trim(),
           locale: lang,
+          idempotency_key: idempotencyKey,
         }),
       });
 
       const data = (await res.json().catch(() => ({}))) as {
         order_code?: string;
+        created_at?: string;
         stripe_checkout_url?: string | null;
         error?: string;
       };
@@ -103,7 +123,11 @@ export default function BagDrawer({
         return;
       }
 
-      // Clear all reserved cart items and navigate straight to payment settlement page
+      // Remember the order for one-click recovery, retire THIS pay-attempt
+      // identity (the next tap is a new order), clear all reserved cart items
+      // and go straight to payment.
+      saveRecentOrder(data.order_code, data.created_at ?? "");
+      clearPendingAttemptKey(attemptFingerprint);
       clearBag();
       setCheckoutStep(false);
       setBagOpen(false);

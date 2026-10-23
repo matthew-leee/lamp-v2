@@ -26,14 +26,18 @@ export async function generateMetadata({
     "meta.home.title",
     locale,
     vars,
-    `${config.brandName} | Curated Architectural Lighting`,
+    locale === "zh-HK"
+      ? `${config.brandName} | 典藏建築燈飾展`
+      : `${config.brandName} | Curated Architectural Lighting`,
   );
   const description = readSiteCopy(
     siteContent,
     "meta.home.description",
     locale,
     vars,
-    `${config.brandName} curated design exhibition, Hong Kong.`,
+    locale === "zh-HK"
+      ? `${config.brandName} 香港限量典藏設計展。`
+      : `${config.brandName} curated design exhibition, Hong Kong.`,
   );
 
   return {
@@ -84,6 +88,21 @@ export default async function LocaleLayout({
       suppressHydrationWarning
     >
       <body className="min-h-dvh font-sans antialiased">
+        {/* GA4 analytics (G23): only when a validated Measurement ID is
+            configured. React 19 hoists the async loader into <head>. */}
+        {config.gaMeasurementId && (
+          <>
+            <script
+              async
+              src={`https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(config.gaMeasurementId)}`}
+            />
+            <script
+              dangerouslySetInnerHTML={{
+                __html: `window.dataLayer = window.dataLayer || []; function gtag(){window.dataLayer.push(arguments);} gtag("js", new Date()); gtag("config", ${JSON.stringify(config.gaMeasurementId)});`,
+              }}
+            />
+          </>
+        )}
         <StorefrontProvider
           catalogueProducts={catalogue.products}
           currency={config.currency}

@@ -18,6 +18,12 @@
 //!   D2b-unit-pinned; here the cookie's presence and its live effect are
 //!   asserted.
 //! * `whoami_without_cookie_is_401_not_authenticated`: no cookie, no session.
+//! * `logout_revokes_the_session_server_side`: `POST /api/admin/logout` is
+//!   SERVER-SIDE revocation (findings G17), not cookie deletion — the same
+//!   cookie answers the generic 401 on whoami afterwards while its signature
+//!   would still verify until `exp`, the `revoked_admin_sessions` deny-list
+//!   holds the token's SHA-256 (never the token itself), and a DIFFERENT
+//!   session survives the logout (per-token, never "log everyone out").
 //! * `mutation_round_trip_writes_product_row_and_audit_row`: with a session
 //!   cookie, `POST /api/admin/products` lands the EXACT posted values in
 //!   Postgres (verified by direct SQL, not by echoing the response; the
@@ -248,6 +254,102 @@ fn whoami_without_cookie_is_401_not_authenticated() {
     ));
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, NOT_AUTHENTICATED_401);
+}
+
+/// Logout is server-side revocation (findings G17), not cookie deletion: the
+/// SAME cookie must be refused afterwards even though its signature would
+/// still verify until `exp`, the deny-list must hold the token's SHA-256
+/// (never the token), and a DIFFERENT session must survive the logout.
+#[test]
+fn logout_revokes_the_session_server_side() {
+    let Some(url) = common::scratch_db_url() else {
+        return;
+    };
+    let db = ScratchDb::new(&url, "auth_logout_revoke");
+    db.apply_migrations();
+    let state = boot_admin(&db);
+    let cookie = minted_session_cookie(&state);
+    let router = admin_router(state);
+
+    // The cookie works before logout.
+    let (status, _, body) = db.block_on(send(
+        &router,
+        admin_request(Method::GET, "/api/admin/whoami", Some(&cookie), ""),
+    ));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, format!(r#"{{"username":"{ADMIN_USERNAME}"}}"#));
+
+    // Logout answers the exact contract and clears the cookie under the same
+    // attribute shape login set it with (an attribute-mismatched clear would
+    // leave the cookie in the browser).
+    let (status, headers, body) = db.block_on(send(
+        &router,
+        admin_request(Method::POST, "/api/admin/logout", Some(&cookie), ""),
+    ));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, LOGIN_OK);
+    let secure = if config::session_cookie_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
+    let set_cookie = headers
+        .get(header::SET_COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .expect("logout must clear the cookie via Set-Cookie");
+    assert_eq!(
+        set_cookie,
+        format!(
+            "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{secure}",
+            admin::SESSION_COOKIE_NAME
+        )
+    );
+
+    // The SAME cookie is now dead server-side: the core of the finding.
+    let (status, _, body) = db.block_on(send(
+        &router,
+        admin_request(Method::GET, "/api/admin/whoami", Some(&cookie), ""),
+    ));
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, NOT_AUTHENTICATED_401);
+
+    // Postgres witnesses the revocation: exactly one row, holding the
+    // token's SHA-256 — a leaked deny-list can never resurrect a session.
+    let token = cookie
+        .strip_prefix(&format!("{}=", admin::SESSION_COOKIE_NAME))
+        .expect("minted cookie is name=token");
+    let hash = admin::token_sha256_hex(token);
+    assert_ne!(hash, token);
+    assert_eq!(hash.len(), 64, "the deny-list holds a hex SHA-256");
+    let rows = db.block_on(async {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT username, token_hash FROM revoked_admin_sessions",
+        )
+        .fetch_all(db.pool())
+        .await
+        .expect("revoked_admin_sessions scan failed")
+    });
+    assert_eq!(rows, vec![(ADMIN_USERNAME.to_string(), hash)]);
+    assert!(
+        !rows.iter().any(|(_, stored)| stored == token),
+        "the deny-list must never store the token itself"
+    );
+
+    // A different session is NOT revoked by this logout (revocation is
+    // per-token). Minted at now+60s so it can never be byte-identical to the
+    // revoked token: session tokens are deterministic per clock second.
+    let other_token = admin::session_cookie_value(
+        ADMIN_USERNAME,
+        common::SESSION_SECRET,
+        Utc::now().timestamp() + 60,
+    );
+    let other_cookie = format!("{}={other_token}", admin::SESSION_COOKIE_NAME);
+    let (status, _, body) = db.block_on(send(
+        &router,
+        admin_request(Method::GET, "/api/admin/whoami", Some(&other_cookie), ""),
+    ));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, format!(r#"{{"username":"{ADMIN_USERNAME}"}}"#));
 }
 
 // ---------------------------------------------------------------------------

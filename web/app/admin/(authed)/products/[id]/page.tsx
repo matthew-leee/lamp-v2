@@ -49,6 +49,7 @@ export default async function AdminProductStudioPage({
 
   return (
     <AdminProductStudioClient
+      key={product.id}
       initialProduct={product}
       allProducts={allProducts}
       currency={currency}

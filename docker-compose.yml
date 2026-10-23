@@ -68,6 +68,10 @@ services:
         NEXT_PUBLIC_LOCALES: ${NEXT_PUBLIC_LOCALES:-en,zh-HK}
     restart: unless-stopped
     user: "1000:1000"
+    volumes:
+      # G18: operator photo uploads must survive redeploys — keep them on a
+      # named volume instead of the container filesystem.
+      - uploads_data:/app/public/uploads
     depends_on:
       api:
         condition: service_healthy
@@ -137,6 +141,7 @@ volumes:
   pgdata:
   caddy_data:
   caddy_config:
+  uploads_data:
 
 networks:
   backend:

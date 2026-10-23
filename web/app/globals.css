@@ -143,3 +143,24 @@ body {
     color: #000000 !important;
   }
 }
+
+/*
+  Accessibility (G23): honour the OS-level reduced-motion preference —
+  shorten every transition/animation to an imperceptible duration instead of
+  removing it outright, so state feedback survives without vestibular motion.
+*/
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  html {
+    scroll-behavior: auto;
+  }
+}

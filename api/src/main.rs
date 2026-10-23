@@ -124,6 +124,7 @@ fn app(state: AppState) -> Router {
     // exactly like whoami.
     let admin_protected: Router<AppState> = Router::new()
         .route("/whoami", get(admin::whoami))
+        .route("/logout", post(admin::logout))
         .route(
             "/products",
             get(admin_crud::list_products).post(admin_crud::create_product),
@@ -192,6 +193,15 @@ fn app(state: AppState) -> Router {
         .route(
             "/api/orders/{order_code}/cancel",
             post(orders::cancel_customer_order),
+        )
+        // Paid-email delivery ledger (findings G02): the web tier reports the
+        // outcome of every paid-confirmation email here (no session — the
+        // caller is our own server route, like submit-fps/cancel), so sends
+        // are deduplicated against `paid_email_sent_at` and failures stay
+        // visible instead of vanishing.
+        .route(
+            "/api/orders/{order_code}/email-delivery",
+            post(orders::record_email_delivery),
         )
         .route("/api/webhooks/stripe", post(orders::stripe_webhook))
         .route("/api/admin/login", post(admin::login))
@@ -1660,5 +1670,113 @@ mod tests {
                 "{method} {uri}"
             );
         }
+    }
+
+    fn logout_request(cookie: Option<&str>, with_csrf: bool) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/admin/logout")
+            .header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            builder = builder.header("cookie", cookie);
+        }
+        if with_csrf {
+            builder = builder.header("x-requested-with", "test-client");
+        }
+        builder.body(Body::from("{}".to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn logout_is_behind_the_admin_middleware() {
+        // POST /api/admin/logout revokes a session SERVER-SIDE (findings G17):
+        // it must never run for an unauthenticated caller — the exact
+        // contract the admin_protected router mounts it behind.
+        let cookie = test_session_cookie();
+        // No cookie: 401 even though the session key could verify one.
+        let response = app(test_state(None, Some(test_session_key())))
+            .oneshot(logout_request(None, true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "no cookie");
+        // Cookie present but no configured session key: nothing can verify.
+        let response = app(test_state(None, None))
+            .oneshot(logout_request(Some(&cookie), true))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "no session key"
+        );
+        // Cookie + session key but no CSRF header: the guard answers 403 —
+        // logout is a state change like every other admin mutation.
+        let response = app(test_state(None, Some(test_session_key())))
+            .oneshot(logout_request(Some(&cookie), false))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "no CSRF header");
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.to_vec()).unwrap(),
+            "{\"error\":\"missing X-Requested-With header\"}"
+        );
+        // Valid cookie + CSRF header, but no DB pool: logout fails closed
+        // (503) without clearing the cookie.
+        let response = app(test_state(None, Some(test_session_key())))
+            .oneshot(logout_request(Some(&cookie), true))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logout must fail closed when DB pool is absent"
+        );
+        assert!(
+            response.headers().get("set-cookie").is_none(),
+            "failed logout must not clear the cookie"
+        );
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(String::from_utf8(bytes.to_vec()).unwrap(), DB_GATE);
+    }
+
+    #[tokio::test]
+    async fn email_delivery_validates_before_the_db_gate() {
+        // POST /api/orders/{order_code}/email-delivery wiring pin (findings
+        // G02): a malformed body is the standard 400 before any DB work, a
+        // valid one stops at the DB gate (pool: None).
+        let app = app(test_state(None, None));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/orders/ORD-1-1/email-delivery")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not json".to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.to_vec()).unwrap(),
+            "{\"error\":\"invalid JSON body\"}"
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/orders/ORD-1-1/email-delivery")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sent":true}"#.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(String::from_utf8(bytes.to_vec()).unwrap(), DB_GATE);
     }
 }

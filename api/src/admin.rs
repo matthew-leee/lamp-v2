@@ -20,6 +20,7 @@
 //!   top-level cross-site form POSTs);
 //! - nothing here logs a password, a hash or the session secret.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use argon2::{
@@ -36,7 +37,7 @@ use axum::{
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tracing::{error, info, warn};
 
@@ -101,14 +102,20 @@ impl SessionKey {
 }
 
 /// Claims carried inside the signed payload. Serialised as JSON
-/// (`{"sub":...,"exp":...}`) and hashed verbatim, so the exact payload bytes
-/// are what the signature authenticates.
+/// (`{"sub":...,"exp":...,"jti":...}`) and hashed verbatim, so the exact
+/// payload bytes are what the signature authenticates.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionClaims {
     /// Subject: the admin username.
     pub sub: String,
     /// Expiry as a unix timestamp (seconds). Rejected when `exp <= now`.
     pub exp: i64,
+    /// Token identity: `timestamp_micros` hex + a process-local monotonic
+    /// counter, so two logins in the same second mint DISTINCT tokens (and
+    /// therefore distinct revocation hashes). `#[serde(default)]` keeps
+    /// pre-`jti` tokens verifiable.
+    #[serde(default)]
+    pub jti: String,
 }
 
 /// The authenticated admin behind a request, inserted into request extensions
@@ -236,16 +243,45 @@ pub fn verify_session(token: &str, key: &[u8], now_unix: i64) -> Option<SessionC
     Some(claims)
 }
 
-/// Pure builder for the cookie value: signs `{"sub": username, "exp": now +
-/// SESSION_TTL_SECS}`. Shared by the login handler and the contract tests so
-/// both mint tokens the same way.
+/// Monotonic per-process counter behind [`next_session_jti`].
+static SESSION_JTI_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Token identity for ONE login: micros-since-epoch hex + the process-local
+/// counter. Two logins minted in the same second can therefore never produce
+/// the same payload — before `jti`, both minted byte-identical tokens and a
+/// logout of one silently revoked the other (and made both share one
+/// revocation-ledger row).
+fn next_session_jti() -> String {
+    let micros = Utc::now().timestamp_micros();
+    let seq = SESSION_JTI_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{micros:016x}{seq:04x}")
+}
+
+/// Pure builder for the cookie value: signs
+/// `{"sub": username, "exp": now + SESSION_TTL_SECS, "jti": ...}`. Shared by
+/// the login handler and the contract tests so both mint tokens the same way.
 pub fn session_cookie_value(username: &str, key: &[u8], now_unix: i64) -> String {
     let claims = SessionClaims {
         sub: username.to_string(),
         exp: now_unix + SESSION_TTL_SECS,
+        jti: next_session_jti(),
     };
     let payload = serde_json::to_vec(&claims).expect("SessionClaims always serialises");
     sign_session(&payload, key)
+}
+
+/// SHA-256 of a session token, lowercase hex — what the server-side
+/// revocation ledger stores (`revoked_admin_sessions.token_hash`, 0008).
+/// A HASH, never the token itself: a leaked ledger can deny sessions but can
+/// never resurrect one, and equal tokens hash equal (the lookup is exact).
+pub fn token_sha256_hex(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Pure charset/length rule mirroring the `admin_users` CHECK constraint in
@@ -265,6 +301,19 @@ fn session_set_cookie(token: &str, secure: bool) -> String {
     let mut cookie = format!(
         "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_TTL_SECS}"
     );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+/// Builds the LOGOUT `Set-Cookie`: same attribute contract as
+/// [`session_set_cookie`] but an empty value and `Max-Age=0`, so the browser
+/// drops the cookie exactly the way it drops it at natural expiry. Clearing
+/// the cookie is the browser half of logout; the server half is the
+/// [`logout`] handler's revocation row.
+fn session_clear_cookie(secure: bool) -> String {
+    let mut cookie = format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
     if secure {
         cookie.push_str("; Secure");
     }
@@ -539,6 +588,79 @@ pub async fn whoami(req: Request) -> Result<Json<WhoamiResponse>, ApiError> {
     }))
 }
 
+/// `POST /api/admin/logout` — server-side session revocation (findings G17).
+/// The browser-local logout (cookie deletion) is not enough for a bearer
+/// token: without this, a stolen cookie keeps working until `exp` (7 days).
+/// So the token's SHA-256 is recorded in `revoked_admin_sessions` (0008) —
+/// with the token's own expiry — and [`require_admin`] refuses any listed
+/// hash from that moment on. The deny-list row is written BEFORE the cookie
+/// is cleared; a failed write answers 503 so the operator is never told
+/// "logged out" while the key still turns.
+///
+/// Mounted inside the `admin_protected` router: like every admin mutation it
+/// runs behind [`require_admin`] + the CSRF guard.
+pub async fn logout(
+    State(app): State<AppState>,
+    req: Request,
+) -> Result<([(HeaderName, String); 1], Json<LoginResponse>), ApiError> {
+    let user = req
+        .extensions()
+        .get::<CurrentUser>()
+        .ok_or_else(not_authenticated)?;
+    let Some(token) = req
+        .headers()
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| find_cookie(value, SESSION_COOKIE_NAME))
+        .map(str::to_owned)
+    else {
+        return Err(not_authenticated());
+    };
+    // Re-verify for the `exp` claim: the deny-list row's lifetime IS the
+    // token's expiry (after it, the signature alone rejects the token), and
+    // `require_admin` has just accepted this exact token, so a `None` here
+    // means it crossed `exp` mid-request — an honest 401, not a fake logout.
+    let claims = match app.session_key.as_ref() {
+        Some(key) => verify_session(&token, key.as_bytes(), Utc::now().timestamp()),
+        None => None,
+    };
+    let Some(claims) = claims else {
+        return Err(not_authenticated());
+    };
+    // Fail closed when the DB pool is absent: without the deny-list write the
+    // token still turns, so "logged out" must never be reported — a 503 tells
+    // the operator the revocation could NOT be recorded (same contract as
+    // every other admin mutation: `require_pool`, never a silent skip).
+    let pool = state::require_pool(&app)?;
+    // Prune rows that can no longer reject anything (their token's `exp`
+    // has passed) — the logout path is the natural sweeper — then record
+    // THIS token. `ON CONFLICT (token_hash) DO NOTHING`: logging out
+    // twice must keep the first revocation moment.
+    sqlx::query("DELETE FROM revoked_admin_sessions WHERE expires_at <= now()")
+        .execute(pool)
+        .await
+        .map_err(|e| state::database_unavailable("failed to prune revoked sessions", &e))?;
+    sqlx::query(
+        "INSERT INTO revoked_admin_sessions (token_hash, username, expires_at) \
+         VALUES ($1, $2, to_timestamp($3)) ON CONFLICT (token_hash) DO NOTHING",
+    )
+    .bind(token_sha256_hex(&token))
+    .bind(&user.username)
+    .bind(claims.exp as f64)
+    .execute(pool)
+    .await
+    .map_err(|e| state::database_unavailable("failed to revoke session", &e))?;
+    info!(username = %user.username, "admin session revoked server-side");
+    Ok((
+        [(
+            header::SET_COOKIE,
+            session_clear_cookie(config::session_cookie_secure()),
+        )],
+        Json(LoginResponse { ok: true }),
+    ))
+}
+
 /// Middleware for every `/api/admin` route except login: requires a valid
 /// `admin_session` cookie (fresh clock, [`verify_session`]), inserts
 /// [`CurrentUser`] into request extensions, and for non-GET/HEAD/OPTIONS
@@ -573,6 +695,32 @@ pub async fn require_admin(
             .is_some_and(|value| !value.is_empty());
         if !has_header {
             return Err(missing_x_requested_with());
+        }
+    }
+
+    // Server-side revocation (findings G17): a logged-out token is dead even
+    // while its signature still verifies. Lookup is by HASH — the ledger
+    // never stores tokens. Fail-closed on EVERY database error — including a
+    // missing `revoked_admin_sessions` table (migration 0008 not applied): a
+    // deployment that cannot check revocation must never pretend it checked
+    // (a 503, never an admin page built from a possibly-revoked session).
+    if let (Some(pool), Some(token)) = (app.pool.as_ref(), token.as_deref()) {
+        let revoked = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM revoked_admin_sessions \
+             WHERE token_hash = $1 AND expires_at > now())",
+        )
+        .bind(token_sha256_hex(token))
+        .fetch_one(pool)
+        .await;
+        match revoked {
+            Ok(true) => return Err(not_authenticated()),
+            Ok(false) => {}
+            Err(e) => {
+                return Err(state::database_unavailable(
+                    "failed to check session revocation",
+                    &e,
+                ));
+            }
         }
     }
 
@@ -881,6 +1029,7 @@ mod tests {
         let payload = serde_json::to_vec(&SessionClaims {
             sub: "admin".to_string(),
             exp: NOW,
+            jti: String::new(),
         })
         .unwrap();
         let token = sign_session(&payload, TEST_KEY);
@@ -892,6 +1041,7 @@ mod tests {
         let payload = serde_json::to_vec(&SessionClaims {
             sub: "admin".to_string(),
             exp: NOW + 1,
+            jti: String::new(),
         })
         .unwrap();
         let token = sign_session(&payload, TEST_KEY);
@@ -905,6 +1055,31 @@ mod tests {
         assert_eq!(claims.sub, "ops_user-1");
         assert_eq!(claims.exp - NOW, 7 * 24 * 60 * 60);
         assert_eq!(SESSION_TTL_SECS, 7 * 24 * 60 * 60);
+        assert!(!claims.jti.is_empty(), "every fresh token carries a jti");
+    }
+
+    #[test]
+    fn two_logins_in_the_same_second_mint_distinct_tokens() {
+        // Before `jti`, two logins in the same second produced byte-identical
+        // tokens — logging one out revoked the other, and both shared one
+        // revocation-ledger row.
+        let a = session_cookie_value("admin", TEST_KEY, NOW);
+        let b = session_cookie_value("admin", TEST_KEY, NOW);
+        assert_ne!(a, b, "same-second logins must never share one token");
+        let claims_a = verify_session(&a, TEST_KEY, NOW).unwrap();
+        let claims_b = verify_session(&b, TEST_KEY, NOW).unwrap();
+        assert_ne!(claims_a.jti, claims_b.jti);
+    }
+
+    #[test]
+    fn pre_jti_tokens_still_verify() {
+        // Tokens minted before the `jti` claim existed must stay valid until
+        // their own `exp` (the claim is identity, never an auth gate).
+        let payload = format!("{{\"sub\":\"admin\",\"exp\":{}}}", NOW + 60).into_bytes();
+        let token = sign_session(&payload, TEST_KEY);
+        let claims = verify_session(&token, TEST_KEY, NOW).expect("legacy token must verify");
+        assert_eq!(claims.sub, "admin");
+        assert_eq!(claims.jti, "");
     }
 
     // -- usernames ---------------------------------------------------------
@@ -977,6 +1152,39 @@ mod tests {
         assert!(cookie.contains("Max-Age=604800"));
         assert!(cookie.ends_with("; Secure"));
         assert!(!session_set_cookie("TOKEN", false).contains("Secure"));
+    }
+
+    #[test]
+    fn clear_cookie_drops_the_session_with_the_contract_flags() {
+        // Logout must drop the cookie under the SAME attributes it was set
+        // with (an attribute-mismatched clear leaves the cookie in place).
+        let cookie = session_clear_cookie(true);
+        assert_eq!(
+            cookie,
+            "admin_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Secure"
+        );
+        assert_eq!(
+            session_clear_cookie(false),
+            "admin_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+        );
+    }
+
+    #[test]
+    fn token_sha256_hex_matches_known_answers() {
+        // Known-answer vectors (FIPS 180 / python hashlib) pin the exact
+        // digest + hex spelling — a self-consistent round trip could not
+        // catch a consistently wrong construction that the DB lookup would
+        // then share with the writer.
+        assert_eq!(
+            token_sha256_hex(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            token_sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // The revocation lookup is exact: distinct tokens hash distinctly.
+        assert_ne!(token_sha256_hex("abc"), token_sha256_hex("abd"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useStorefront } from "./storefront-context";
@@ -13,6 +13,13 @@ import {
   formatMoney,
   formatProductTitle,
 } from "@/lib/format";
+import {
+  clearPendingAttemptKey,
+  getOrCreatePendingAttemptKey,
+  hasPendingAttemptForSlug,
+  pendingAttemptFingerprint,
+  saveRecentOrder,
+} from "@/lib/recent-order";
 import { htmlLang, t, ui, type Locale } from "@/lib/i18n";
 
 interface ProductStoryClientProps {
@@ -53,7 +60,10 @@ export default function ProductStoryClient({
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const localeCopy = product.content[lang] ?? product.content.en ?? {};
+  // LANG-01: strictly locale-specific copy — a `zh-HK` route must NEVER
+  // fall back to English product copy (a missing translation shows the
+  // neutral model name instead of an English-only string).
+  const localeCopy = product.content[lang] ?? {};
   const title = formatProductTitle(
     product.model,
     localeCopy.model_alt,
@@ -66,6 +76,19 @@ export default function ProductStoryClient({
   const avail = stockInfo ? stockInfo.available : null;
   const isSoldOut = avail !== null && avail <= 0;
   const maxSelectable = avail !== null && avail > 0 ? avail : 1;
+
+  // G01 recovery: a lost response on the LAST unit leaves the shopper's own
+  // unpaid hold showing "sold out" while their pay attempt is still
+  // replayable. Read the durable attempt store after mount (localStorage is
+  // client-only — reading it during render would break hydration).
+  const [hasPendingAttempt, setHasPendingAttempt] = useState(false);
+  useEffect(() => {
+    setHasPendingAttempt(hasPendingAttemptForSlug(product.slug));
+  }, [product.slug]);
+  const canRecoverPending = isSoldOut && hasPendingAttempt;
+  // The express checkout must open and submit when the product is available
+  // OR when a pending attempt exists to replay and recover.
+  const canOpenCheckout = !isSoldOut || canRecoverPending;
 
   const ref = product.reference_price;
   const savings = ref
@@ -87,9 +110,23 @@ export default function ProductStoryClient({
 
   async function handleExpressCheckout(e: FormEvent) {
     e.preventDefault();
-    if (submitting || isSoldOut) return;
+    if (submitting || !canOpenCheckout) return;
     setSubmitting(true);
     setErrorMsg(null);
+
+    // One order per pay tap (findings G01): the DURABLE identity of THIS pay
+    // attempt — the same selection + payment method + email keeps the same
+    // `idempotency_key` across a refresh, a lost-response retry and even a
+    // second browser tab, so a retry can never create a second ghost order
+    // holding stock.
+    const attemptFingerprint = pendingAttemptFingerprint(
+      [{ slug: product.slug, quantity }],
+      paymentMethod,
+      customerEmail,
+    );
+    const idempotencyKey = getOrCreatePendingAttemptKey(attemptFingerprint);
+    setHasPendingAttempt(true);
+
     try {
       const res = await fetch("/api/orders/reserve", {
         method: "POST",
@@ -103,10 +140,12 @@ export default function ProductStoryClient({
           customer_phone: customerPhone.trim(),
           delivery_address: deliveryAddress.trim(),
           locale: lang,
+          idempotency_key: idempotencyKey,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
         order_code?: string;
+        created_at?: string;
         error?: string;
       };
       if (!res.ok || !data.order_code) {
@@ -119,6 +158,11 @@ export default function ProductStoryClient({
         await refreshStock();
         return;
       }
+      // Remember the order for one-click recovery and retire THIS
+      // pay-attempt identity (the next tap is a new order).
+      saveRecentOrder(data.order_code, data.created_at ?? "");
+      clearPendingAttemptKey(attemptFingerprint);
+      setHasPendingAttempt(hasPendingAttemptForSlug(product.slug));
       await refreshStock();
       router.push(`/${lang}/checkout/${encodeURIComponent(data.order_code)}`);
     } catch {
@@ -289,7 +333,7 @@ export default function ProductStoryClient({
                     (s) => s.model === product.model,
                   );
                   return siblings.map((sib) => {
-                    const sibCopy = sib.content[lang] ?? sib.content.en ?? {};
+                    const sibCopy = sib.content[lang] ?? {};
                     const sibLabel = allSameModel
                       ? sibCopy.colourway || sib.model
                       : formatProductTitle(
@@ -366,12 +410,16 @@ export default function ProductStoryClient({
 
             <button
               type="button"
-              disabled={isSoldOut}
+              disabled={!canOpenCheckout}
               onClick={() => setExpressCheckoutOpen((o) => !o)}
               className="w-full bg-[var(--text-primary)] py-4 text-xs font-semibold tracking-[0.22em] uppercase text-[var(--surface-page)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35"
             >
               {isSoldOut
-                ? t(ui.stockSoldOut, lang)
+                ? canRecoverPending
+                  ? lang === "zh-HK"
+                    ? "恢復未完成訂單"
+                    : "Recover pending order"
+                  : t(ui.stockSoldOut, lang)
                 : `${t(ui.buyNow, lang)} · ${formatMoney(product.price_cents * quantity, currency)}`}
             </button>
 
@@ -381,7 +429,7 @@ export default function ProductStoryClient({
           </div>
 
           {/* Inline Express Checkout Panel (When "Buy Now" is clicked) */}
-          {expressCheckoutOpen && !isSoldOut && (
+          {expressCheckoutOpen && canOpenCheckout && (
             <form
               onSubmit={handleExpressCheckout}
               className="mt-5 flex flex-col gap-4 border border-[var(--color-glow)] bg-[var(--surface-card)] p-5"
@@ -500,9 +548,13 @@ export default function ProductStoryClient({
                   ? lang === "zh-HK"
                     ? "正在鎖定存倉及開啟付款頁..."
                     : "Locking Stock & Opening Payment Gateway..."
-                  : lang === "zh-HK"
-                    ? "確認留貨並進入付款頁 →"
-                    : "Continue to Payment Settlement →"}
+                  : canRecoverPending
+                    ? lang === "zh-HK"
+                      ? "恢復訂單並進入付款頁 →"
+                      : "Recover Order & Open Payment →"
+                    : lang === "zh-HK"
+                      ? "確認留貨並進入付款頁 →"
+                      : "Continue to Payment Settlement →"}
               </button>
             </form>
           )}

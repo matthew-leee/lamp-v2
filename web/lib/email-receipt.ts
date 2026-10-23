@@ -207,8 +207,12 @@ export async function dispatchTransactionalEmail(opts: {
     "concierge@example.com";
   const fromHeader = `${opts.brandName} <${fromEmail}>`;
 
-  // 1. Resend API transport when RESEND_API_KEY is configured
+  // 1. Resend API transport when RESEND_API_KEY is configured. A Resend
+  //    failure is NOT the end of the attempt (G15): warn and fall through to
+  //    the SMTP transport below so one broken provider can never silence a
+  //    paying customer.
   const resendKey = process.env.RESEND_API_KEY?.trim();
+  let resendFailureDetail: string | null = null;
   if (resendKey) {
     try {
       const res = await fetch("https://api.resend.com/emails", {
@@ -227,18 +231,14 @@ export async function dispatchTransactionalEmail(opts: {
       if (res.ok) {
         return { dispatched: true, transport: "resend" };
       }
-      return {
-        dispatched: false,
-        transport: "resend",
-        detail: `Resend HTTP ${res.status}`,
-      };
+      resendFailureDetail = `Resend HTTP ${res.status}`;
     } catch (err) {
-      return {
-        dispatched: false,
-        transport: "resend",
-        detail: err instanceof Error ? err.message : "Resend network error",
-      };
+      resendFailureDetail =
+        err instanceof Error ? err.message : "Resend network error";
     }
+    console.warn(
+      `[email-receipt] Resend delivery to ${recipient} failed (${resendFailureDetail}); trying SMTP fallback if configured.`,
+    );
   }
 
   // 2. Direct SMTPS (465) or STARTTLS (587) transport when SMTP_USER and SMTP_PASS are set
@@ -280,12 +280,116 @@ export async function dispatchTransactionalEmail(opts: {
       return {
         dispatched: false,
         transport: "smtp",
-        detail: msg,
+        detail: [resendFailureDetail, msg].filter(Boolean).join("; "),
       };
     }
   }
 
-  return { dispatched: false, transport: "preview-only" };
+  return {
+    dispatched: false,
+    transport: resendFailureDetail ? "resend" : "preview-only",
+    detail: resendFailureDetail ?? "Email transport not configured or failed",
+  };
+}
+
+/**
+ * Atomically claims THE one paid-confirmation email send for an order
+ * (`POST /api/orders/{order_code}/email-delivery` with `{ claim: true, sent:
+ * false }`, findings G02). Returns `true` only when THIS caller won the claim
+ * (`data.claimed === true`): concurrent settlement paths (webhook-only,
+ * session-verify return, direct card, admin FPS confirmation) must dispatch
+ * the paid receipt exactly once, and only the claimer may send it. Any doubt
+ * (HTTP error, network hiccup) answers `false` — a missing receipt is
+ * visible and repairable via "Re-send Receipt", a duplicate is not.
+ */
+export async function claimPaidOrderEmail(
+  apiBaseUrl: string,
+  orderCode: string,
+): Promise<boolean> {
+  const base = apiBaseUrl.replace(/\/+$/, "");
+  try {
+    const res = await fetch(
+      `${base}/api/orders/${encodeURIComponent(orderCode)}/email-delivery`,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claim: true, sent: false }),
+      },
+    );
+    if (!res.ok) {
+      console.warn(
+        `[email-receipt] Could not claim the paid email for ${orderCode} (HTTP ${res.status})`,
+      );
+      return false;
+    }
+    const data = (await res.json().catch(() => ({}))) as { claimed?: boolean };
+    return data.claimed === true;
+  } catch (err) {
+    console.warn(
+      `[email-receipt] Could not claim the paid email for ${orderCode}: ${
+        err instanceof Error ? err.message : "network error"
+      }`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Reports the OUTCOME of one email attempt to the Rust API delivery ledger
+ * (`POST /api/orders/{order_code}/email-delivery`, findings G02). Success on
+ * the paid receipt stamps `paid_email_sent_at` (the durable "customer was
+ * told" flag that de-duplicates later sends); a FAILED attempt (`sent:
+ * false`) RELEASES the in-flight claim and stores `email_last_error`, so a
+ * retry or the admin "Re-send Receipt" surface can still reach the customer —
+ * without ever wiping an already-confirmed `paid_email_sent_at`.
+ *
+ * `kind` names which email this outcome belongs to: `"reservation"` (the hold
+ * confirmation) only clears `email_last_error` and never stamps the PAID
+ * email ledger; `"paid"` (the default) is the paid receipt. Best-effort by
+ * design: a ledger hiccup must never break checkout or the webhook reply.
+ */
+export type EmailDeliveryKind = "reservation" | "paid";
+
+export async function recordOrderEmailDelivery(
+  apiBaseUrl: string,
+  orderCode: string,
+  result: EmailDeliveryResult,
+  kind?: EmailDeliveryKind,
+): Promise<void> {
+  const base = apiBaseUrl.replace(/\/+$/, "");
+  // The API rejects NUL bytes and notes > 2000 chars — sanitize first.
+  const errorNote = result.dispatched
+    ? ""
+    : (result.detail ?? "Email transport not configured or failed")
+        .replace(/\u0000/g, " ")
+        .slice(0, 2000);
+  try {
+    const res = await fetch(
+      `${base}/api/orders/${encodeURIComponent(orderCode)}/email-delivery`,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sent: result.dispatched,
+          error: errorNote,
+          ...(kind ? { kind } : {}),
+        }),
+      },
+    );
+    if (!res.ok) {
+      console.warn(
+        `[email-receipt] Could not record email delivery for ${orderCode} (HTTP ${res.status})`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[email-receipt] Could not record email delivery for ${orderCode}: ${
+        err instanceof Error ? err.message : "network error"
+      }`,
+    );
+  }
 }
 
 async function sendViaSmtp(cfg: {

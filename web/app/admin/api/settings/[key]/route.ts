@@ -1,5 +1,10 @@
 import { revalidatePath } from "next/cache";
-import { adminFetch, verifyAdminSession } from "@/lib/admin-auth";
+import {
+  adminFetch,
+  verifyAdminSession,
+  verifySameOriginRequest,
+} from "@/lib/admin-auth";
+import { validateSettingValue } from "@/lib/settings-validation";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +12,13 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ key: string }> },
 ): Promise<Response> {
+  // G17: second-layer CSRF guard for the web tier's own mutation endpoints.
+  if (!verifySameOriginRequest(request)) {
+    return Response.json(
+      { error: "Cross-origin request rejected" },
+      { status: 403 },
+    );
+  }
   const session = await verifyAdminSession();
   if (!session) {
     return new Response(null, { status: 303, headers: { Location: "/admin/login" } });
@@ -38,6 +50,20 @@ export async function POST(
   }
 
   const effectiveVal = action === "off" ? "" : value;
+
+  // G23: save-time format validation — a malformed GA Measurement ID,
+  // WhatsApp number or site URL is rejected with an actionable error instead
+  // of silently reaching the live storefront configuration.
+  const verdict = validateSettingValue(key, effectiveVal);
+  if (!verdict.ok) {
+    return new Response(null, {
+      status: 303,
+      headers: {
+        Location: `/admin/settings?error=${encodeURIComponent(verdict.error)}`,
+      },
+    });
+  }
+
   const { ok, data } = await adminFetch(
     `/api/admin/settings/${encodeURIComponent(key)}`,
     {

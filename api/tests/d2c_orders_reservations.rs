@@ -123,6 +123,10 @@ fn orders_router(state: AppState) -> Router {
     Router::new()
         .route("/api/orders/reserve", post(orders::create_reservation))
         .route("/api/orders/{order_code}", get(orders::get_order_by_code))
+        .route(
+            "/api/orders/{order_code}/email-delivery",
+            post(orders::record_email_delivery),
+        )
         .route("/api/webhooks/stripe", post(orders::stripe_webhook))
         .with_state(state.clone())
         .merge(admin_router(state))
@@ -338,6 +342,107 @@ fn assert_in_future(raw: &str) {
     );
 }
 
+/// Asserts the FULL webhook-response contract (findings G02): the PAY-01
+/// verdict fields plus the recipient/email metadata the web tier needs to
+/// address and dedupe the paid-confirmation email. Whole-value equality —
+/// no field may go missing and none may appear from nowhere — with runtime
+/// data (the order code) compared exactly.
+fn assert_webhook_response(
+    body: &str,
+    idempotent: bool,
+    status: &str,
+    order_code: &str,
+    locale: &str,
+    paid_email_sent: bool,
+) {
+    let actual: Value = serde_json::from_str(body).expect("webhook response must be JSON");
+    let expected = json!({
+        "ok": true,
+        "idempotent": idempotent,
+        "status": status,
+        "order_code": order_code,
+        "customer_name": CUSTOMER_NAME,
+        "customer_email": CUSTOMER_EMAIL,
+        "locale": locale,
+        "paid_email_sent": paid_email_sent,
+    });
+    assert_eq!(actual, expected, "webhook response contract: {body}");
+}
+
+/// One extra-field / extra-header reserve probe (idempotency and locale
+/// inputs ride alongside the plain [`reserve_body`]).
+fn reserve_raw(
+    db: &ScratchDb,
+    router: &Router,
+    body: &str,
+    header: Option<(&str, &str)>,
+) -> (StatusCode, String) {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri("/api/orders/reserve")
+        .header("content-type", "application/json");
+    if let Some((name, value)) = header {
+        builder = builder.header(name, value);
+    }
+    let request = builder
+        .body(Body::from(body.to_string()))
+        .expect("reserve request must build");
+    call(db, router, request)
+}
+
+/// `(locale, idempotency_key, paid_email_sent_at, email_last_error)` for one
+/// order — direct SQL: the row is the truth, never the handler's answer.
+fn order_email_state(
+    db: &ScratchDb,
+    order_code: &str,
+) -> (String, Option<String>, Option<DateTime<Utc>>, String) {
+    db.block_on(async {
+        sqlx::query_as::<_, (String, Option<String>, Option<DateTime<Utc>>, String)>(
+            "SELECT locale, idempotency_key, paid_email_sent_at, email_last_error \
+             FROM orders WHERE order_code = $1",
+        )
+        .bind(order_code)
+        .fetch_optional(db.pool())
+        .await
+        .unwrap_or_else(|e| panic!("order lookup failed for {order_code}: {e}"))
+        .unwrap_or_else(|| panic!("order {order_code} must exist"))
+    })
+}
+
+/// `paid_email_claimed_at` for one order — the RECOVERABLE in-flight claim
+/// lease ("a send is in flight", never delivery proof), read straight from
+/// Postgres so the handler can never lie about the claim state.
+fn order_paid_email_claimed_at(db: &ScratchDb, order_code: &str) -> Option<DateTime<Utc>> {
+    let (claimed_at,) = db.block_on(async {
+        sqlx::query_as::<_, (Option<DateTime<Utc>>,)>(
+            "SELECT paid_email_claimed_at FROM orders WHERE order_code = $1",
+        )
+        .bind(order_code)
+        .fetch_optional(db.pool())
+        .await
+        .unwrap_or_else(|e| panic!("order lookup failed for {order_code}: {e}"))
+        .unwrap_or_else(|| panic!("order {order_code} must exist"))
+    });
+    claimed_at
+}
+
+/// Backdates `paid_email_claimed_at` (simulates a claim lease aging without
+/// sleeping): the 2-minute RECOVERY window must expire in the database clock,
+/// not in wall time the test would have to wait out.
+fn backdate_paid_email_claim(db: &ScratchDb, order_code: &str, minutes: i64) {
+    db.block_on(async {
+        sqlx::query(
+            "UPDATE orders SET paid_email_claimed_at = now() - ($2 || ' minutes')::interval \
+             WHERE order_code = $1",
+        )
+        .bind(order_code)
+        .bind(minutes.to_string())
+        .execute(db.pool())
+        .await
+        .unwrap_or_else(|e| panic!("claim backdate failed for {order_code}: {e}"));
+    });
+}
+
 // ---------------------------------------------------------------------------
 // 1. Atomic reservations (STOCK-01)
 // ---------------------------------------------------------------------------
@@ -532,7 +637,7 @@ fn stripe_webhook_settles_a_reservation_once_and_replays_are_no_ops() {
     // The verified event: reserved -> paid, units consumed (PAY-01).
     let (status, body) = stripe_event(&db, &router, "evt_1", &order_code, total_cents, &currency);
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, r#"{"ok":true,"idempotent":false,"status":"paid"}"#);
+    assert_webhook_response(&body, false, "paid", &order_code, "en", false);
     assert_eq!(order_status(&db, &order_code), "paid");
     assert_eq!(stock(&db, WEBHOOK_SLUG), (3, 0, 0)); // 5 - 2 sold, 0 held
     assert_eq!(payment_event_count(&db), 1);
@@ -540,7 +645,7 @@ fn stripe_webhook_settles_a_reservation_once_and_replays_are_no_ops() {
     // PAY-01 replay: same event_id -> `idempotent: true` and NOTHING moves.
     let (status, body) = stripe_event(&db, &router, "evt_1", &order_code, total_cents, &currency);
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, r#"{"ok":true,"idempotent":true,"status":"paid"}"#);
+    assert_webhook_response(&body, true, "paid", &order_code, "en", false);
     assert_eq!(
         stock(&db, WEBHOOK_SLUG),
         (3, 0, 0),
@@ -552,7 +657,7 @@ fn stripe_webhook_settles_a_reservation_once_and_replays_are_no_ops() {
     // twice (the state rules only settle a live reservation).
     let (status, body) = stripe_event(&db, &router, "evt_2", &order_code, total_cents, &currency);
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, r#"{"ok":true,"idempotent":false,"status":"paid"}"#);
+    assert_webhook_response(&body, false, "paid", &order_code, "en", false);
     assert_eq!(
         stock(&db, WEBHOOK_SLUG),
         (3, 0, 0),
@@ -625,9 +730,13 @@ fn expired_reservation_is_released_and_late_payment_is_flagged() {
         &first_currency,
     );
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body,
-        r#"{"ok":true,"idempotent":false,"status":"late_payment_review"}"#
+    assert_webhook_response(
+        &body,
+        false,
+        "late_payment_review",
+        &first_code,
+        "en",
+        false,
     );
     assert_eq!(order_status(&db, &first_code), "late_payment_review");
     assert_eq!(
@@ -916,9 +1025,13 @@ fn release_cancels_a_reservation_and_frees_its_units() {
         &currency,
     );
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body,
-        r#"{"ok":true,"idempotent":false,"status":"late_payment_review"}"#
+    assert_webhook_response(
+        &body,
+        false,
+        "late_payment_review",
+        &order_code,
+        "en",
+        false,
     );
     assert_eq!(stock(&db, WEBHOOK_SLUG), (5, 0, 0), "no stock is consumed");
 }
@@ -1035,4 +1148,769 @@ fn multi_sku_shopping_cart_reserves_settles_and_releases_all_items_atomically() 
     assert_eq!(status, StatusCode::OK, "{rel_body}");
     assert_eq!(stock(&db, "panthella-160-v3-beige"), (1, 0, 0));
     assert_eq!(stock(&db, "ph-2-1-table-chrome"), (1, 0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// 8. Reservation idempotency — one order per pay tap (findings G01)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reservation_idempotency_key_creates_one_order_per_pay_attempt() {
+    let Some(url) = common::scratch_db_url() else {
+        return;
+    };
+    let db = ScratchDb::new(&url, "orders_idempotency");
+    db.apply_migrations();
+    let (router, _cookie) = boot_orders(&db);
+
+    // One pay tap = one order = one held unit (RESERVE_SLUG seeds 2 units).
+    let mut body: Value = serde_json::from_str(&reserve_body(RESERVE_SLUG, 1, "card")).unwrap();
+    body["idempotency_key"] = json!("pay-attempt-1");
+    let (status, first) = reserve_raw(&db, &router, &body.to_string(), None);
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let order_a: Value = serde_json::from_str(&first).expect("reservation response must be JSON");
+    let code_a = order_a["order_code"]
+        .as_str()
+        .expect("order_code")
+        .to_string();
+    let id_a = order_a["id"].as_i64().expect("id");
+    assert_eq!(
+        order_a["idempotent_replay"],
+        json!(false),
+        "a fresh insert is never a replay"
+    );
+    assert_eq!(
+        stock(&db, RESERVE_SLUG),
+        (2, 1, 0),
+        "one tap holds one unit"
+    );
+
+    // The response is lost and the client retries the SAME pay attempt: the
+    // very same order comes back and NOTHING is held a second time — the
+    // ghost-order scenario from findings G01 is closed.
+    let (status, retry) = reserve_raw(&db, &router, &body.to_string(), None);
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    let order_b: Value = serde_json::from_str(&retry).expect("reservation response must be JSON");
+    assert_eq!(order_b["order_code"], json!(code_a));
+    assert_eq!(order_b["id"], json!(id_a));
+    assert_eq!(order_b["items"], order_a["items"]);
+    assert_eq!(order_b["total_cents"], order_a["total_cents"]);
+    assert_eq!(
+        order_b["idempotent_replay"],
+        json!(true),
+        "a replayed attempt is flagged so the web tier sends no second email"
+    );
+    assert_eq!(
+        stock(&db, RESERVE_SLUG),
+        (2, 1, 0),
+        "a retry never reserves twice"
+    );
+
+    // Key normalisation: a padded spelling is the SAME attempt.
+    body["idempotency_key"] = json!("  pay-attempt-1  ");
+    let (status, padded) = reserve_raw(&db, &router, &body.to_string(), None);
+    assert_eq!(status, StatusCode::OK, "{padded}");
+    let padded_order: Value =
+        serde_json::from_str(&padded).expect("reservation response must be JSON");
+    assert_eq!(padded_order["order_code"], json!(code_a));
+    assert_eq!(stock(&db, RESERVE_SLUG), (2, 1, 0));
+
+    // The body key WINS over a conflicting `Idempotency-Key` header (the
+    // header is only a fallback), so this is still pay attempt 1.
+    body["idempotency_key"] = json!("pay-attempt-1");
+    let (status, via_body) = reserve_raw(
+        &db,
+        &router,
+        &body.to_string(),
+        Some(("idempotency-key", "pay-attempt-2")),
+    );
+    assert_eq!(status, StatusCode::OK, "{via_body}");
+    let via_body_order: Value =
+        serde_json::from_str(&via_body).expect("reservation response must be JSON");
+    assert_eq!(via_body_order["order_code"], json!(code_a));
+    assert_eq!(stock(&db, RESERVE_SLUG), (2, 1, 0));
+
+    // Header fallback (G01): no body key at all -> the standard
+    // `Idempotency-Key` header names the attempt. A DIFFERENT key IS a
+    // different attempt: a new order holds the second unit — and retrying
+    // THAT key replays that order.
+    let hdr_body = reserve_body(RESERVE_SLUG, 1, "fps");
+    let (status, second) = reserve_raw(
+        &db,
+        &router,
+        &hdr_body,
+        Some(("idempotency-key", "pay-attempt-2")),
+    );
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let order_c: Value = serde_json::from_str(&second).expect("reservation response must be JSON");
+    let code_c = order_c["order_code"]
+        .as_str()
+        .expect("order_code")
+        .to_string();
+    assert_ne!(code_c, code_a, "a different key is a different attempt");
+    assert_eq!(stock(&db, RESERVE_SLUG), (2, 2, 0));
+
+    let (status, retry_c) = reserve_raw(
+        &db,
+        &router,
+        &hdr_body,
+        Some(("idempotency-key", "pay-attempt-2")),
+    );
+    assert_eq!(status, StatusCode::OK, "{retry_c}");
+    let retry_c_order: Value =
+        serde_json::from_str(&retry_c).expect("reservation response must be JSON");
+    assert_eq!(retry_c_order["order_code"], json!(code_c));
+    assert_eq!(retry_c_order["id"], order_c["id"]);
+    assert_eq!(
+        stock(&db, RESERVE_SLUG),
+        (2, 2, 0),
+        "the header-key retry holds nothing extra"
+    );
+
+    // Postgres agrees: exactly two orders, keyed 1:1 with the two attempts.
+    let rows = db.block_on(async {
+        sqlx::query_as::<_, (i64, String, Option<String>)>(
+            "SELECT id, order_code, idempotency_key FROM orders ORDER BY id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .expect("orders idempotency scan failed")
+    });
+    assert_eq!(rows.len(), 2, "one order per pay attempt: {rows:?}");
+    assert_eq!(
+        rows[0],
+        (id_a, code_a.clone(), Some("pay-attempt-1".to_string()))
+    );
+    assert_eq!(rows[1].1, code_c);
+    assert_eq!(rows[1].2.as_deref(), Some("pay-attempt-2"));
+}
+
+// ---------------------------------------------------------------------------
+// 9. Order locale + paid-email delivery ledger (findings G02)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn order_locale_is_persisted_and_paid_email_metadata_round_trips() {
+    let Some(url) = common::scratch_db_url() else {
+        return;
+    };
+    let db = ScratchDb::new(&url, "orders_locale_email");
+    db.apply_migrations();
+    let (router, _cookie) = boot_orders(&db);
+
+    // A zh-HK checkout REMEMBERS its language (findings G02): on the
+    // response and in Postgres, so the admin FPS email is not forced English.
+    let mut zh_body: Value = serde_json::from_str(&reserve_body(RESERVE_SLUG, 1, "card")).unwrap();
+    zh_body["locale"] = json!("zh-HK");
+    let (status, zh) = reserve_raw(&db, &router, &zh_body.to_string(), None);
+    assert_eq!(status, StatusCode::OK, "{zh}");
+    let order_zh: Value = serde_json::from_str(&zh).expect("reservation response must be JSON");
+    let code_zh = order_zh["order_code"]
+        .as_str()
+        .expect("order_code")
+        .to_string();
+    let total_zh = order_zh["total_cents"].as_i64().expect("total_cents");
+    let currency_zh = order_zh["currency"].as_str().expect("currency").to_string();
+    assert_eq!(order_zh["locale"], json!("zh-HK"));
+    assert_eq!(order_email_state(&db, &code_zh).0, "zh-HK");
+
+    // An omitted locale defaults to "en" — the pre-0008 contract unchanged.
+    let order_en = reserve(&db, &router, WEBHOOK_SLUG, 1, "card");
+    let code_en = order_en["order_code"]
+        .as_str()
+        .expect("order_code")
+        .to_string();
+    assert_eq!(order_en["locale"], json!("en"));
+    assert_eq!(order_email_state(&db, &code_en).0, "en");
+
+    // The webhook response carries WHO to tell, in WHICH language, and
+    // whether they have been told already — before any email: false.
+    let (status, body) = stripe_event(&db, &router, "evt_zh_1", &code_zh, total_zh, &currency_zh);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_webhook_response(&body, false, "paid", &code_zh, "zh-HK", false);
+
+    // The web tier reports the delivered email: one atomic statement stamps
+    // the delivery ledger.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code_zh}/email-delivery"),
+            r#"{"sent":true}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":true,"claimed":false}"#
+    );
+    let (_, _, sent_at_zh, last_error) = order_email_state(&db, &code_zh);
+    let sent_at_zh = sent_at_zh.expect("paid_email_sent_at must be set after a delivered email");
+    assert_eq!(last_error, "", "a delivery carries no error");
+
+    // A duplicate report (the classic double-send race) never moves the
+    // original delivery moment — the dedupe flag is stable.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code_zh}/email-delivery"),
+            r#"{"sent":true}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":true,"claimed":false}"#
+    );
+    assert_eq!(
+        order_email_state(&db, &code_zh).2,
+        Some(sent_at_zh),
+        "the delivery moment never moves"
+    );
+
+    // A later event on the settled order now says the customer WAS told.
+    let (status, body) = stripe_event(&db, &router, "evt_zh_2", &code_zh, total_zh, &currency_zh);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_webhook_response(&body, false, "paid", &code_zh, "zh-HK", true);
+
+    // Failure path: `sent:false` + error records the reason and leaves the
+    // ledger open — no failure disappears silently (G02).
+    let total_en = order_en["total_cents"].as_i64().expect("total_cents");
+    let currency_en = order_en["currency"].as_str().expect("currency").to_string();
+    let (status, body) = stripe_event(&db, &router, "evt_en_1", &code_en, total_en, &currency_en);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_webhook_response(&body, false, "paid", &code_en, "en", false);
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code_en}/email-delivery"),
+            r#"{"sent":false,"error":"smtp down"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":false,"claimed":false}"#
+    );
+    let (_, _, sent_en, last_error) = order_email_state(&db, &code_en);
+    assert_eq!(sent_en, None, "a failed send never claims delivery");
+    assert_eq!(last_error, "smtp down");
+
+    // The successful re-send clears the error and stamps the delivery.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code_en}/email-delivery"),
+            r#"{"sent":true}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":true,"claimed":false}"#
+    );
+    let (_, _, sent_en, last_error) = order_email_state(&db, &code_en);
+    assert!(sent_en.is_some(), "the re-send stamps the delivery");
+    assert_eq!(
+        last_error, "",
+        "a successful re-send clears the recorded error"
+    );
+
+    // Unknown order: the exact 404 — no ledger row is ever invented.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            "/api/orders/ORD-nope-1/email-delivery",
+            r#"{"sent":true}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body, ORDER_NOT_FOUND_404);
+
+    // A NUL in the error note is the exact 400 before any DB work.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code_zh}/email-delivery"),
+            r#"{"sent":false,"error":"a\u0000b"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body, r#"{"error":"error contains a NUL byte"}"#);
+}
+
+// ---------------------------------------------------------------------------
+// 10. One pay tap racing for the LAST unit in stock (findings G01 recovery)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn concurrent_same_key_retries_on_the_last_unit_share_one_order() {
+    let Some(url) = common::scratch_db_url() else {
+        return;
+    };
+    let db = ScratchDb::new(&url, "orders_idempotent_race");
+    db.apply_migrations();
+    let (router, _cookie) = boot_orders(&db);
+
+    // 0003 seeds FPS_SLUG with exactly ONE unit — both attempts want it.
+    assert_eq!(stock(&db, FPS_SLUG), (1, 0, 0));
+
+    let mut body: Value = serde_json::from_str(&reserve_body(FPS_SLUG, 1, "card")).unwrap();
+    body["idempotency_key"] = json!("pay-attempt-last-unit");
+    let raw = body.to_string();
+
+    // ONE pay tap fired twice at the same moment (a lost response plus a
+    // refresh / second-tab retry) racing for the last unit in stock. Whichever
+    // way the race resolves — the UNIQUE-key loser or the insufficient-stock
+    // re-check — BOTH callers must get the SAME order and the unit must be
+    // held exactly once: a 409 for one retry would be a lost customer.
+    let (first, second) = db.block_on(async {
+        tokio::join!(
+            send(
+                &router,
+                json_request(Method::POST, "/api/orders/reserve", &raw)
+            ),
+            send(
+                &router,
+                json_request(Method::POST, "/api/orders/reserve", &raw)
+            ),
+        )
+    });
+    let (status_a, _, body_a) = first;
+    let (status_b, _, body_b) = second;
+    assert_eq!(status_a, StatusCode::OK, "{body_a}");
+    assert_eq!(status_b, StatusCode::OK, "{body_b}");
+    let order_a: Value = serde_json::from_str(&body_a).expect("reservation response must be JSON");
+    let order_b: Value = serde_json::from_str(&body_b).expect("reservation response must be JSON");
+    assert_eq!(order_a["order_code"], order_b["order_code"]);
+    assert_eq!(order_a["id"], order_b["id"]);
+    assert_eq!(
+        stock(&db, FPS_SLUG),
+        (1, 1, 0),
+        "one pay tap holds the last unit exactly once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. Atomic paid-email claim & failure release (findings G02 exactly-once)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn paid_email_claim_is_atomic_and_a_failed_send_releases_it() {
+    let Some(url) = common::scratch_db_url() else {
+        return;
+    };
+    let db = ScratchDb::new(&url, "orders_email_claim");
+    db.apply_migrations();
+    let (router, _cookie) = boot_orders(&db);
+
+    let mut body: Value = serde_json::from_str(&reserve_body(RESERVE_SLUG, 1, "card")).unwrap();
+    body["idempotency_key"] = json!("pay-attempt-claim");
+    let (status, first) = reserve_raw(&db, &router, &body.to_string(), None);
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let order: Value = serde_json::from_str(&first).expect("reservation response must be JSON");
+    let code = order["order_code"]
+        .as_str()
+        .expect("order_code")
+        .to_string();
+    let total = order["total_cents"].as_i64().expect("total_cents");
+    let currency = order["currency"].as_str().expect("currency").to_string();
+
+    // Nothing to claim before settlement: the PAID email is meaningless on a
+    // `reserved` order — no claim won, no stamp written.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"claim":true,"sent":false}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":false,"claimed":false}"#
+    );
+
+    // Settle the order (the webhook-only path).
+    let (status, body) = stripe_event(&db, &router, "evt_claim_1", &code, total, &currency);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_webhook_response(&body, false, "paid", &code, "en", false);
+
+    // Exactly ONE claimer wins — the loser must not send a second receipt.
+    // A won claim reports `paid_email_sent: false`: the claim is a RECOVERABLE
+    // lease on the send, never delivery proof (`paid_email_sent_at` is only
+    // stamped when the actual dispatch succeeds).
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"claim":true,"sent":false}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body, r#"{"ok":true,"paid_email_sent":false,"claimed":true}"#,
+        "the claim winner has NOT been recorded as delivered yet"
+    );
+    assert_eq!(
+        order_email_state(&db, &code).2,
+        None,
+        "claiming alone must never stamp paid_email_sent_at"
+    );
+    assert!(
+        order_paid_email_claimed_at(&db, &code).is_some(),
+        "the winning claim is recorded as an in-flight lease"
+    );
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"claim":true,"sent":false}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body, r#"{"ok":true,"paid_email_sent":false,"claimed":false}"#,
+        "a second claimer must never send"
+    );
+
+    // A failed dispatch after claiming RELEASES the claim and records the
+    // reason, so a retry or the admin re-send surface can still succeed.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"sent":false,"error":"smtp down"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":false,"claimed":false}"#
+    );
+    let (_, _, sent_at, last_error) = order_email_state(&db, &code);
+    assert_eq!(sent_at, None, "a failed send must never fake a delivery");
+    assert_eq!(
+        order_paid_email_claimed_at(&db, &code),
+        None,
+        "a failed send must release the claim"
+    );
+    assert_eq!(last_error, "smtp down");
+
+    // The retry claims again — and delivers.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"claim":true,"sent":false}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body, r#"{"ok":true,"paid_email_sent":false,"claimed":true}"#,
+        "the released claim is claimable again"
+    );
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"sent":true}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":true,"claimed":false}"#
+    );
+    let (_, _, sent_at, last_error) = order_email_state(&db, &code);
+    assert!(
+        sent_at.is_some(),
+        "the successful retry stamps the delivery"
+    );
+    assert_eq!(
+        order_paid_email_claimed_at(&db, &code),
+        None,
+        "a delivered send releases the claim"
+    );
+    assert_eq!(last_error, "", "a success clears the recorded error");
+
+    // Re-sending a RESERVATION (hold) email on a `reserved` order must never
+    // mark the PAID email as sent.
+    let hold = reserve(&db, &router, RESERVE_SLUG, 1, "fps");
+    let hold_code = hold["order_code"].as_str().expect("order_code").to_string();
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{hold_code}/email-delivery"),
+            r#"{"sent":true}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":false,"claimed":false}"#
+    );
+    let (_, _, hold_sent, _) = order_email_state(&db, &hold_code);
+    assert_eq!(
+        hold_sent, None,
+        "a hold email never stamps the paid-email ledger"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. Claim lease recovery, `kind` routing & delivery durability (round-2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn paid_email_claim_lease_expires_and_reservation_kind_never_stamps() {
+    let Some(url) = common::scratch_db_url() else {
+        return;
+    };
+    let db = ScratchDb::new(&url, "orders_email_claim_lease");
+    db.apply_migrations();
+    let (router, _cookie) = boot_orders(&db);
+
+    // Settled order for the claim-lease + delivery-durability half.
+    let order = reserve(&db, &router, RESERVE_SLUG, 1, "card");
+    let code = order["order_code"]
+        .as_str()
+        .expect("order_code")
+        .to_string();
+    let total = order["total_cents"].as_i64().expect("total_cents");
+    let currency = order["currency"].as_str().expect("currency").to_string();
+    let (status, body) = stripe_event(&db, &router, "evt_lease_1", &code, total, &currency);
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The claim is won as a lease — delivery is still unproven.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"claim":true,"sent":false}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":false,"claimed":true}"#
+    );
+
+    // While the lease is live, nobody else may take the send.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"claim":true,"sent":false}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":false,"claimed":false}"#
+    );
+
+    // A concurrent admin re-send of the RESERVATION (hold) email must neither
+    // stamp the PAID-email ledger nor steal/release the in-flight paid claim.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"sent":true,"kind":"reservation"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":false,"claimed":false}"#
+    );
+    assert_eq!(
+        order_email_state(&db, &code).2,
+        None,
+        "a reservation outcome must never stamp the paid-email ledger"
+    );
+    assert!(
+        order_paid_email_claimed_at(&db, &code).is_some(),
+        "a reservation outcome must not release the in-flight paid claim"
+    );
+
+    // Even a FAILED reservation re-send must leave the active paid claim intact.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"sent":false,"kind":"reservation","error":"Reservation SMTP timeout"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        order_paid_email_claimed_at(&db, &code).is_some(),
+        "a failed reservation outcome must not release the in-flight paid claim"
+    );
+    assert_eq!(
+        order_email_state(&db, &code).3,
+        "Reservation SMTP timeout",
+        "failed reservation outcome still records email_last_error"
+    );
+
+    // A web tier that died mid-dispatch must not block the receipt forever:
+    // once the 2-minute lease expires, the send is claimable again.
+    backdate_paid_email_claim(&db, &code, 3);
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"claim":true,"sent":false}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body, r#"{"ok":true,"paid_email_sent":false,"claimed":true}"#,
+        "an expired claim lease is recoverable"
+    );
+
+    // The recovered send delivers and stamps the confirmed moment.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"sent":true}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let confirmed_at = order_email_state(&db, &code)
+        .2
+        .expect("paid_email_sent_at must be set after a delivered email");
+
+    // A FAILED later manual re-send records its reason but must NEVER wipe
+    // the already-confirmed delivery moment.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"sent":false,"error":"manual resend failed"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body, r#"{"ok":true,"paid_email_sent":true,"claimed":false}"#,
+        "a failed re-send never un-tells a customer who was already told"
+    );
+    let (_, _, sent_at, last_error) = order_email_state(&db, &code);
+    assert_eq!(
+        sent_at,
+        Some(confirmed_at),
+        "the confirmed delivery moment survives a failed re-send"
+    );
+    assert_eq!(last_error, "manual resend failed");
+
+    // A later RESERVATION re-send clears the error note ONLY — the confirmed
+    // paid-email moment stays exactly where it was.
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{code}/email-delivery"),
+            r#"{"sent":true,"kind":"reservation"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":true,"claimed":false}"#
+    );
+    let (_, _, sent_at, last_error) = order_email_state(&db, &code);
+    assert_eq!(
+        sent_at,
+        Some(confirmed_at),
+        "a reservation outcome never moves the paid-email moment"
+    );
+    assert_eq!(
+        last_error, "",
+        "a successful reservation re-send clears the recorded error"
+    );
+
+    // On a RESERVED order (admin "Re-send Receipt" of the hold confirmation):
+    // the failure is recorded, and the reservation success clears ONLY the
+    // error — the PAID-email ledger is never touched.
+    let hold = reserve(&db, &router, RESERVE_SLUG, 1, "fps");
+    let hold_code = hold["order_code"].as_str().expect("order_code").to_string();
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{hold_code}/email-delivery"),
+            r#"{"sent":false,"error":"smtp down"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(order_email_state(&db, &hold_code).3, "smtp down");
+    let (status, body) = call(
+        &db,
+        &router,
+        json_request(
+            Method::POST,
+            &format!("/api/orders/{hold_code}/email-delivery"),
+            r#"{"sent":true,"kind":"reservation"}"#,
+        ),
+    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        r#"{"ok":true,"paid_email_sent":false,"claimed":false}"#
+    );
+    let (_, _, hold_sent, hold_error) = order_email_state(&db, &hold_code);
+    assert_eq!(
+        hold_sent, None,
+        "a hold email never stamps the paid-email ledger"
+    );
+    assert_eq!(
+        hold_error, "",
+        "a delivered hold email clears the recorded error"
+    );
+    assert_eq!(
+        order_paid_email_claimed_at(&db, &hold_code),
+        None,
+        "a reserved order never holds a paid-email claim"
+    );
 }

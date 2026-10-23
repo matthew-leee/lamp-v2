@@ -55,7 +55,7 @@ export default async function CheckoutSettlementPage({
 
   const itemSummaries: EmailOrderItemSummary[] = rawItems.map((it) => {
     const p = catalogue.products.find((cp) => cp.slug === it.product_slug);
-    const copy = p?.content[locale] ?? p?.content.en ?? {};
+    const copy = p?.content[locale] ?? {};
     const title = p
       ? formatProductTitle(p.model, copy.model_alt, copy.colourway, locale)
       : it.product_slug;
@@ -68,7 +68,7 @@ export default async function CheckoutSettlementPage({
     };
   });
 
-  const copy = product?.content[locale] ?? product?.content.en ?? {};
+  const copy = product?.content[locale] ?? {};
   const productTitle = product
     ? formatProductTitle(product.model, copy.model_alt, copy.colourway, locale)
     : order.product_slug;

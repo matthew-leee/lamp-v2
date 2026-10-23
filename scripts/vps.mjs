@@ -129,8 +129,46 @@ withAskPass((childEnv) => {
       "echo '[vps-hook] Checking out latest commit into /opt/storefront-v2...'",
       "git --work-tree=/opt/storefront-v2 --git-dir=/opt/storefront-v2.git checkout -f v2-clean-room",
       "cd /opt/storefront-v2",
+      // 1. Database FIRST: the migration below needs it running, and the api
+      //    healthcheck gates the rest of the stack anyway. Wait for Postgres
+      //    to actually accept queries (`pg_isready`) — `up -d db` returning
+      //    does NOT mean the server is ready, and a migration dropped on a
+      //    booting server would fail the deploy.
+      "echo '[vps-hook] Starting the database...'",
+      "docker compose up -d db",
+      "echo '[vps-hook] Waiting for Postgres readiness...'",
+      "until docker compose exec -T db sh -c 'pg_isready -U \"${POSTGRES_USER:-storefront}\" -d \"${POSTGRES_DB:-storefront}\"' >/dev/null 2>&1; do sleep 1; done",
+      // 2. Idempotent schema hardening (G01/G02/G17 — 0008 uses IF NOT EXISTS /
+      //    additive columns only): converge an existing production database on
+      //    the new schema BEFORE any code that requires it starts.
+      "echo '[vps-hook] Applying idempotent migration 0008 (payment / email / session hardening)...'",
+      "docker compose exec -T db sh -c 'psql -U \"${POSTGRES_USER:-storefront}\" -d \"${POSTGRES_DB:-storefront}\" -v ON_ERROR_STOP=1' < api/migrations/0008_payment_email_session_hardening.sql",
+      // 3. Preserve operator photo uploads (G18): pull whatever the existing
+      //    web container has at /app/public/uploads (container filesystem on a
+      //    pre-volume deployment, the volume itself otherwise) into a staging
+      //    dir BEFORE the rebuild replaces that container, then seed the
+      //    uploads_data volume through a throwaway web container mounting it.
+      //    Skipped entirely when there is nothing to migrate (first deploy).
+      //    A FAILED copy FAILS the deploy (no `|| true`): losing operator
+      //    photos silently is worse than a red hook. The seeded files are
+      //    re-owned to the web container user (1000:1000) so it can still
+      //    write NEW uploads into the volume afterwards.
+      "echo '[vps-hook] Preserving operator uploads into the uploads_data volume...'",
+      "mkdir -p /tmp/storefront_v2_uploads_staging",
+      "if docker container inspect storefront-v2-web-1 >/dev/null 2>&1; then",
+      "  docker cp storefront-v2-web-1:/app/public/uploads/. /tmp/storefront_v2_uploads_staging/",
+      "fi",
+      "if [ -n \"$(ls -A /tmp/storefront_v2_uploads_staging 2>/dev/null)\" ]; then",
+      "  docker compose run --rm --no-deps -T --user root --entrypoint sh -v /tmp/storefront_v2_uploads_staging:/from:ro web -c 'cp -a /from/. /app/public/uploads/ && chown -R 1000:1000 /app/public/uploads'",
+      "fi",
+      "rm -rf /tmp/storefront_v2_uploads_staging",
+      // 4. Only now rebuild + restart the full stack (web now serves uploads
+      //    from the volume via /api/uploads/{filename}). Caddy bind-mounts
+      //    ops/Caddyfile, so it must be RESTARTED to pick up routing changes
+      //    — `up -d --build` alone leaves the old config loaded.
       "echo '[vps-hook] Building and restarting Docker Compose services...'",
       "docker compose up -d --build",
+      "docker compose restart caddy",
       "docker compose ps",
       "echo '[vps-hook] Deployment complete!'",
     ].join("\n");

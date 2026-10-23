@@ -2,10 +2,15 @@
 {$SITE_DOMAIN:localhost} {
     encode zstd gzip
 
-    # Stripe webhook & API health probes go straight to the Rust API.
+    # The Stripe webhook goes through the Next.js webhook route
+    # (web/app/api/webhooks/stripe/route.ts): it settles the order in the Rust
+    # API AND then sends the paid email + revalidates the cache — a webhook-only
+    # settlement (the buyer never returns to the site) must do all three, which
+    # only the web tier can.
     handle /api/webhooks/stripe {
-        reverse_proxy api:8080
+        reverse_proxy web:3002
     }
+    # API health probes go straight to the Rust API.
     handle /health {
         reverse_proxy api:8080
     }
@@ -22,7 +27,7 @@
     encode zstd gzip
 
     handle /api/webhooks/stripe {
-        reverse_proxy api:8080
+        reverse_proxy web:3002
     }
     handle /health {
         reverse_proxy api:8080

@@ -31,7 +31,7 @@ mod common;
 
 use common::{assert_ambient_pg_env_clean, validate_scratch_target, ScratchDb};
 
-/// The verified public schema after 0001..0007 (sorted, `information_schema`
+/// The verified public schema after 0001..0008 (sorted, `information_schema`
 /// order). A new table is a deliberate migration-contract change: update this
 /// list consciously, never by making the test fuzzy.
 const EXPECTED_TABLES: &[&str] = &[
@@ -44,6 +44,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "product_content",
     "products",
     "reference_prices",
+    "revoked_admin_sessions",
     "settings",
     "site_content",
 ];
@@ -58,16 +59,17 @@ const NO_REFERENCE_PRICE_SLUG: &str = "ph-1-1-piano-table-limited";
 const EDIT_MARKER: &str = "ADMIN-EDIT-MARKER-9c2f";
 
 /// Row counts of the opening drop (the 0003 + 0005 seed contract), covering
-/// ALL 10 tables so a fresh apply AND every seed replay check the complete
-/// state. The five always-empty tables are counted alongside the seeded ones
+/// ALL 12 tables so a fresh apply AND every seed replay check the complete
+/// state. The six always-empty tables are counted alongside the seeded ones
 /// — a non-zero count there is a regression even though they are "not part of
 /// the seed": `settings` is CONFIG-01 (overrides table, never seeded),
 /// `audit_log` is written only by the D2 admin console, `admin_users` holds
 /// no seeded secrets (the server upserts the first admin from env at boot),
-/// and `orders`/`payment_events` are runtime money-path rows (0006: created
-/// only by real reservations and verified gateway events). `site_content` is
-/// 36 rows after 0003 plus the 6 atmosphere rows (dayLabel / nightLabel /
-/// caption x 2 locales) that 0005 adds = 42.
+/// `orders`/`payment_events` are runtime money-path rows (0006: created only
+/// by real reservations and verified gateway events), and
+/// `revoked_admin_sessions` is written only by admin logout (0008).
+/// `site_content` is 36 rows after 0003 plus the 6 atmosphere rows
+/// (dayLabel / nightLabel / caption x 2 locales) that 0005 adds = 42.
 struct SeedCounts {
     products: i64,
     pieces: i64,
@@ -80,6 +82,7 @@ struct SeedCounts {
     orders: i64,
     order_items: i64,
     payment_events: i64,
+    revoked_admin_sessions: i64,
 }
 
 impl SeedCounts {
@@ -97,6 +100,7 @@ impl SeedCounts {
             orders: count(db, "orders"),
             order_items: count(db, "order_items"),
             payment_events: count(db, "payment_events"),
+            revoked_admin_sessions: count(db, "revoked_admin_sessions"),
         }
     }
 
@@ -137,6 +141,11 @@ impl SeedCounts {
             self.payment_events, 0,
             "payment_events must stay empty after {phase} (PAY-01 ledger: \
              written only by verified gateway events)"
+        );
+        assert_eq!(
+            self.revoked_admin_sessions, 0,
+            "revoked_admin_sessions must stay empty after {phase} (session \
+             revocation ledger: written only by admin logout)"
         );
     }
 }
@@ -277,9 +286,9 @@ fn migrations_apply_in_order_on_fresh_db() {
     let expected: Vec<String> = EXPECTED_TABLES.iter().map(|t| t.to_string()).collect();
     assert_eq!(tables, expected, "public base tables after 0001..0006");
 
-    // SeedCounts::assert_opening_drop covers ALL 10 tables: the seeded five at
+    // SeedCounts::assert_opening_drop covers ALL 12 tables: the seeded five at
     // their verified counts plus settings/audit_log/admin_users/orders/
-    // payment_events at 0.
+    // payment_events/revoked_admin_sessions at 0.
     SeedCounts::read(&db).assert_opening_drop("0001..0006");
 
     // DROP-01 numbering: pieces 1-16, spread over exactly the 8 seeded SKUs.

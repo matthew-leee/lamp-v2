@@ -18,10 +18,18 @@ export async function generateMetadata({
   const { catalogue, siteContent, config } = await loadStorefrontData();
   const product = catalogue.products.find((p) => p.slug === slug);
   if (!product) {
-    return { title: `Not Found | ${config.brandName}` };
+    // LANG-01: the not-found title speaks the route's language too.
+    return {
+      title:
+        locale === "zh-HK"
+          ? `找不到作品 | ${config.brandName}`
+          : `Not Found | ${config.brandName}`,
+    };
   }
 
-  const localeCopy = product.content[locale] ?? product.content.en ?? {};
+  // LANG-01: strictly locale-specific copy — `zh-HK` never falls back to
+  // English product copy.
+  const localeCopy = product.content[locale] ?? {};
   const displayTitle = formatProductTitle(
     product.model,
     localeCopy.model_alt,
@@ -86,7 +94,9 @@ export default async function ProductStoryPage({
       : p.model === product.model,
   );
 
-  const localeCopy = product.content[locale] ?? product.content.en ?? {};
+  // LANG-01: strictly locale-specific copy — `zh-HK` never falls back to
+  // English product copy.
+  const localeCopy = product.content[locale] ?? {};
   const displayTitle = formatProductTitle(
     product.model,
     localeCopy.model_alt,
@@ -114,7 +124,10 @@ export default async function ProductStoryPage({
       "enquiry.messageTemplate",
       locale,
       vars,
-      `Hello ${config.brandName}, I would like to enquire about ${displayTitle}.`,
+      // LANG-01: the fallback enquiry line speaks the route's language.
+      locale === "zh-HK"
+        ? `你好 ${config.brandName}，我想查詢 ${displayTitle}。`
+        : `Hello ${config.brandName}, I would like to enquire about ${displayTitle}.`,
     ),
   };
 

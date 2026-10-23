@@ -97,7 +97,7 @@ export function resolveSiteConfig(overrides: SettingsMap): SiteConfig {
   const brandName =
     resolveLayered(overrides, "brand.name", process.env.NEXT_PUBLIC_BRAND_NAME) ??
     process.env.NEXT_PUBLIC_BRAND_NAME?.trim() ??
-    "ATELIER";
+    "";
   const rawNative = resolveLayered(
     overrides,
     "brand.name_native",
@@ -181,14 +181,19 @@ export async function loadStorefrontData(): Promise<{
   settings: SettingsMap;
   config: SiteConfig;
 }> {
+  // Resilient secondary-data loading (G23): the catalogue is required, but a
+  // failure of the content or settings channels must degrade to empty
+  // overrides and fall back to env defaults — never crash the page.
   const [catalogue, siteContentWrap, settings] = await Promise.all([
     fetchJsonNoStore<CatalogueResponse>("/api/catalogue"),
-    fetchJsonNoStore<{ content: SiteContentMap }>("/api/site-content"),
-    fetchJsonNoStore<SettingsMap>("/api/settings"),
+    fetchJsonNoStore<{ content: SiteContentMap }>("/api/site-content").catch(
+      () => ({ content: {} as SiteContentMap }),
+    ),
+    fetchJsonNoStore<SettingsMap>("/api/settings").catch(() => ({}) as SettingsMap),
   ]);
-  const siteContent = siteContentWrap.content ?? {};
+  const siteContent = siteContentWrap?.content ?? {};
   const config = resolveSiteConfig(settings ?? {});
-  return { catalogue, siteContent, settings, config };
+  return { catalogue, siteContent, settings: settings ?? {}, config };
 }
 
 export async function fetchLiveStockMap(): Promise<Record<string, {
@@ -229,7 +234,14 @@ export function readSiteCopy(
   vars: { brand: string; pieces?: number | string; subject?: string },
   fallback = "",
 ): string {
-  const raw = siteContent[key]?.[locale] ?? siteContent[key]?.en ?? fallback;
+  // LANG-01: only read the active locale's copy; if absent, use the
+  // locale-matched fallback supplied by the caller (falling back to English
+  // only when the caller provided no localized fallback).
+  const raw =
+    siteContent[key]?.[locale] ||
+    fallback ||
+    (locale === "en" ? siteContent[key]?.en : "") ||
+    "";
   if (!raw) return fallback;
   return interpolateCopy(raw, vars);
 }

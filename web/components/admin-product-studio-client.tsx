@@ -1,6 +1,12 @@
 "use client";
 
-import { useState, type ChangeEvent, type FormEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import LampStage from "./lamp-stage";
@@ -48,6 +54,40 @@ export interface AdminProductSummary {
   slug: string;
   brand: string;
   model: string;
+}
+
+/** Everything the studio form can edit — one sessionStorage draft snapshot. */
+interface StudioDraft {
+  slug: string;
+  brand: string;
+  model: string;
+  family: string;
+  active: boolean;
+  priceDollars: string;
+  stockTotalInput: string;
+  stockQuarantinedInput: string;
+  imageDayUrl: string;
+  imageLitUrl: string;
+  artVariant: ArtVariant;
+  artHue: number;
+  designer: string;
+  designYear: string;
+  dimensions: string;
+  lightSource: string;
+  enModelAlt: string;
+  zhModelAlt: string;
+  enColourway: string;
+  zhColourway: string;
+  enHeritage: string;
+  zhHeritage: string;
+  enElectrical: string;
+  zhElectrical: string;
+  refClear: boolean;
+  refMinDollars: string;
+  refMaxDollars: string;
+  refSourceName: string;
+  refSourceUrl: string;
+  refCheckedOn: string;
 }
 
 const ART_VARIANTS: readonly ArtVariant[] = [
@@ -136,6 +176,138 @@ export default function AdminProductStudioClient({
     row.reference_price?.checked_on ?? "",
   );
 
+  // ------------------------------------------------------------------
+  // G23: session-expiry work protection. Every edit is mirrored into
+  // sessionStorage under `lamp_studio_draft_${product.id}` — a save bounced
+  // by an expired admin session (or any remount) restores the draft verbatim
+  // instead of losing operator work.
+  // ------------------------------------------------------------------
+  const draftKey = `lamp_studio_draft_${initialProduct.id}`;
+
+  /**
+   * Counts every edit so save COMPLETION can tell whether newer edits arrived
+   * while the request was in flight — those drafts must survive (never be
+   * cleared by a save that no longer covers the form).
+   */
+  const editVersionRef = useRef(0);
+
+  /** Marks the form dirty AND counts the edit (see [`editVersionRef`]). */
+  function markDirty() {
+    editVersionRef.current += 1;
+    setDirty(true);
+  }
+
+  /** Drops the persisted draft — only ever called once it is fully saved. */
+  function clearStudioDraft() {
+    try {
+      window.sessionStorage.removeItem(draftKey);
+    } catch {
+      // storage unavailable — persistence is best effort
+    }
+  }
+
+  function collectDraft(): StudioDraft {
+    return {
+      slug,
+      brand,
+      model,
+      family,
+      active,
+      priceDollars,
+      stockTotalInput,
+      stockQuarantinedInput,
+      imageDayUrl,
+      imageLitUrl,
+      artVariant,
+      artHue,
+      designer,
+      designYear,
+      dimensions,
+      lightSource,
+      enModelAlt,
+      zhModelAlt,
+      enColourway,
+      zhColourway,
+      enHeritage,
+      zhHeritage,
+      enElectrical,
+      zhElectrical,
+      refClear,
+      refMinDollars,
+      refMaxDollars,
+      refSourceName,
+      refSourceUrl,
+      refCheckedOn,
+    };
+  }
+
+  const draftJson = JSON.stringify(collectDraft());
+
+  useEffect(() => {
+    if (!dirty) return;
+    try {
+      window.sessionStorage.setItem(draftKey, draftJson);
+    } catch {
+      // storage unavailable — persistence is best effort
+    }
+  }, [dirty, draftKey, draftJson]);
+
+  useEffect(() => {
+    let draft: Partial<StudioDraft>;
+    try {
+      const raw = window.sessionStorage.getItem(draftKey);
+      if (!raw) return;
+      draft = JSON.parse(raw) as Partial<StudioDraft>;
+    } catch {
+      return; // corrupted or unavailable draft — ignore
+    }
+    const applyStr = (v: unknown, set: (s: string) => void) => {
+      if (typeof v === "string") set(v);
+    };
+    applyStr(draft.slug, setSlug);
+    applyStr(draft.brand, setBrand);
+    applyStr(draft.model, setModel);
+    applyStr(draft.family, setFamily);
+    applyStr(draft.priceDollars, setPriceDollars);
+    applyStr(draft.stockTotalInput, setStockTotalInput);
+    applyStr(draft.stockQuarantinedInput, setStockQuarantinedInput);
+    applyStr(draft.imageDayUrl, setImageDayUrl);
+    applyStr(draft.imageLitUrl, setImageLitUrl);
+    applyStr(draft.designer, setDesigner);
+    applyStr(draft.designYear, setDesignYear);
+    applyStr(draft.dimensions, setDimensions);
+    applyStr(draft.lightSource, setLightSource);
+    applyStr(draft.enModelAlt, setEnModelAlt);
+    applyStr(draft.zhModelAlt, setZhModelAlt);
+    applyStr(draft.enColourway, setEnColourway);
+    applyStr(draft.zhColourway, setZhColourway);
+    applyStr(draft.enHeritage, setEnHeritage);
+    applyStr(draft.zhHeritage, setZhHeritage);
+    applyStr(draft.enElectrical, setEnElectrical);
+    applyStr(draft.zhElectrical, setZhElectrical);
+    applyStr(draft.refMinDollars, setRefMinDollars);
+    applyStr(draft.refMaxDollars, setRefMaxDollars);
+    applyStr(draft.refSourceName, setRefSourceName);
+    applyStr(draft.refSourceUrl, setRefSourceUrl);
+    applyStr(draft.refCheckedOn, setRefCheckedOn);
+    if (typeof draft.active === "boolean") setActive(draft.active);
+    if (typeof draft.refClear === "boolean") setRefClear(draft.refClear);
+    if (typeof draft.artHue === "number" && Number.isFinite(draft.artHue)) {
+      setArtHue(draft.artHue);
+    }
+    if (
+      typeof draft.artVariant === "string" &&
+      (ART_VARIANTS as readonly string[]).includes(draft.artVariant)
+    ) {
+      setArtVariant(draft.artVariant as ArtVariant);
+    }
+    editVersionRef.current += 1;
+    setDirty(true);
+    setBanner(
+      "Restored unsaved draft from an interrupted session — review the fields and Save All Changes to persist.",
+    );
+  }, [draftKey]);
+
   const previewCents = parseDollarsToCents(priceDollars) ?? row.price_cents;
   const availableNow = Math.max(
     0,
@@ -170,7 +342,7 @@ export default function AdminProductStudioClient({
       } else {
         setImageLitUrl(data.url);
       }
-      setDirty(true);
+      markDirty();
       setBanner(`Uploaded ${file.name} -> ${data.url} (click Save All Changes to persist)`);
     } finally {
       setUploadingField(null);
@@ -264,6 +436,15 @@ export default function AdminProductStudioClient({
       payload.stock_quarantined = Number.parseInt(stockQuarantinedInput.trim(), 10);
     }
 
+    // G23: snapshot the draft immediately before the save call so a bounced
+    // save (expired session, redirect to login) can be restored verbatim.
+    try {
+      window.sessionStorage.setItem(draftKey, JSON.stringify(collectDraft()));
+    } catch {
+      // best effort
+    }
+    const editVersionAtSaveStart = editVersionRef.current;
+
     try {
       const res = await fetch(`/admin/api/products/${row.id}/full`, {
         method: "PUT",
@@ -278,9 +459,15 @@ export default function AdminProductStudioClient({
         return;
       }
       setRow(data);
-      setStockTotalInput("");
-      setStockQuarantinedInput("");
-      setDirty(false);
+      if (editVersionRef.current === editVersionAtSaveStart) {
+        // Nothing was edited while the save was in flight: the whole draft is
+        // persisted now and can go. (Newer edits keep the dirty flag AND the
+        // draft — they are still unsaved work.)
+        setStockTotalInput("");
+        setStockQuarantinedInput("");
+        setDirty(false);
+        clearStudioDraft();
+      }
       setBanner(`Saved ${data.slug} — live on storefront immediately (0s sync).`);
       router.refresh();
     } catch {
@@ -467,7 +654,7 @@ export default function AdminProductStudioClient({
       {/* Unified Single-Save Form */}
       <form
         onSubmit={handleSaveAll}
-        onChange={() => setDirty(true)}
+        onChange={markDirty}
         className="space-y-8"
       >
         {/* Section 1: Identity, Visibility, Human Dollar Pricing & Stock */}
@@ -672,7 +859,10 @@ export default function AdminProductStudioClient({
                 {imageDayUrl && (
                   <button
                     type="button"
-                    onClick={() => setImageDayUrl("")}
+                    onClick={() => {
+                      setImageDayUrl("");
+                      markDirty();
+                    }}
                     className="text-[var(--text-secondary)] underline"
                   >
                     Clear URL
@@ -710,7 +900,10 @@ export default function AdminProductStudioClient({
                 {imageLitUrl && (
                   <button
                     type="button"
-                    onClick={() => setImageLitUrl("")}
+                    onClick={() => {
+                      setImageLitUrl("");
+                      markDirty();
+                    }}
                     className="text-[var(--text-secondary)] underline"
                   >
                     Clear URL

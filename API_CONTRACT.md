@@ -103,6 +103,7 @@ Public runtime overrides (`settings` table), restricted to the 10 whitelisted co
 
 ### `POST /api/orders/reserve`
 Atomically reserves stock (`30 minutes` for `"card"`, `24 hours` for `"fps"`) using the authoritative database price (`products.price_cents`) across 1 to N distinct SKUs (`CART-01`, `order_items` table).
+- **Idempotency (one order per pay tap)**: an optional `idempotency_key` (body field, <= 128 chars after trimming, NUL-free) or `Idempotency-Key` HTTP header (fallback when the body carries none) identifies ONE pay attempt. Replaying a known key returns the FIRST order unchanged — same `order_code`, no second stock hold — even across concurrent retries (the `orders.idempotency_key` UNIQUE constraint picks one winner), including the race where the retry arrives while the first attempt is still taking the LAST unit in stock: the insufficient-stock refusal is re-checked against the key before it is returned. Blank/absent keys mean no idempotency (legacy clients).
 - **Request JSON**:
   ```json
   {
@@ -114,10 +115,12 @@ Atomically reserves stock (`30 minutes` for `"card"`, `24 hours` for `"fps"`) us
     "customer_name": "Chan Tai Man",
     "customer_email": "chan@example.com",
     "customer_phone": "85291234567",
-    "delivery_address": "Central, Hong Kong"
+    "delivery_address": "Central, Hong Kong",
+    "locale": "en",
+    "idempotency_key": "pay-attempt-0001"
   }
   ```
-  *(Single-SKU `slug` + `quantity` fields are also accepted for backward compatibility.)*
+  *(Single-SKU `slug` + `quantity` fields are also accepted for backward compatibility. `locale` is `"en"` | `"zh-HK"` (LANG-01) and defaults to `"en"`; `idempotency_key` is optional.)*
 - **Response `200 OK`**:
   ```json
   {
@@ -130,6 +133,7 @@ Atomically reserves stock (`30 minutes` for `"card"`, `24 hours` for `"fps"`) us
     "total_cents": 875500,
     "currency": "HKD",
     "payment_method": "card",
+    "locale": "en",
     "status": "reserved",
     "customer_name": "Chan Tai Man",
     "customer_email": "chan@example.com",
@@ -150,9 +154,11 @@ Atomically reserves stock (`30 minutes` for `"card"`, `24 hours` for `"fps"`) us
         "unit_price_cents": 714000,
         "line_total_cents": 714000
       }
-    ]
+    ],
+    "idempotent_replay": false
   }
   ```
+  *(`idempotent_replay` is `false` on a fresh insert and `true` when this answer REPLAYS an earlier attempt loaded by `idempotency_key` — the web tier must not dispatch a second reservation email for a replay.)*
 - **Error Responses**: `400` validation error, `404` product not found/inactive, `409` `{"error": "insufficient stock available"}`.
 
 ### `GET /api/orders/{order_code}`
@@ -167,6 +173,7 @@ Sweeps expired holds and returns public order status (`Cache-Control: no-store`,
     "total_cents": 875500,
     "currency": "HKD",
     "payment_method": "card",
+    "locale": "en",
     "status": "reserved",
     "fps_reference": "",
     "expires_at": "2026-10-15T06:30:00Z",
@@ -196,10 +203,21 @@ Allows a customer with an FPS reservation to submit their bank transfer referenc
 ### `POST /api/orders/{order_code}/cancel`
 Allows a customer with an unpaid `reserved` order to self-cancel the hold (freeing `stock_reserved` immediately so they can switch payment methods or release the piece). Returns `200 OK` `PublicOrderStatus`.
 
+### `POST /api/orders/{order_code}/email-delivery`
+Paid-email delivery ledger: the web tier reports every paid-confirmation email outcome here so sends are deduplicated and failures stay visible. The ledger separates RECOVERABLE claim state (`paid_email_claimed_at`, "a send is in flight") from CONFIRMED delivery (`paid_email_sent_at`, "the customer WAS told") — a claim is a 2-minute lease on the one send, never proof of delivery. Optional body field `kind` names which email the outcome belongs to: `"reservation"` (the hold confirmation) vs `"paid"` (the paid receipt, the default). Four call shapes share this endpoint (response is always `{"ok": true, "paid_email_sent": <post-update paid_email_sent_at IS NOT NULL>, "claimed": <did THIS call win the claim>}`):
+- **Atomic claim** — Body `{"claim": true, "sent": false}`: atomically wins THE one paid-email send, only for a `paid`/`fulfilled` order whose `paid_email_sent_at IS NULL` and whose claim is free (never taken, or the 2-minute lease expired). Exactly one caller ever gets `{"claimed": true, "paid_email_sent": false}` — a won claim reports `paid_email_sent: false` because claiming is not delivery; every other caller (lease held, already sent, or an unpaid order) gets `{"claimed": false, "paid_email_sent": <current state>}`. Automatic send paths claim BEFORE dispatching (and release the claim on ANY post-claim failure) so concurrent settlements can never double-send and a crashed dispatcher cannot block the receipt past the lease.
+- **Reservation outcome** — Body `{"sent": true, "kind": "reservation"}`: the hold-confirmation email was delivered — clears `email_last_error` ONLY. It never touches `paid_email_sent_at` or the paid claim, even on a later-settled order.
+- **Paid success stamp** — Body `{"sent": true}` (or `"kind": "paid"`): stamps `paid_email_sent_at` (COALESCE'd — a repeat can never move the FIRST delivery moment), releases the claim and clears `email_last_error`. Stamped ONLY when the order is `paid`/`fulfilled`: an outcome reported for a `reserved` order never marks the PAID email as sent.
+- **Failure release** — Body `{"sent": false, "error": "..."}` (no claim): an attempt failed after claiming (or a manual re-send failed later) — RELEASES the claim (`paid_email_claimed_at = NULL`) and stores `email_last_error`, so a retry or the admin "re-send receipt" can still reach the customer. An already-confirmed `paid_email_sent_at` is NEVER wiped by a later failed re-send.
+
+`404` for an unknown order code; `400` for a NUL byte or > 2000-char error note.
+
+`404` for an unknown order code; `400` for a NUL byte or > 2000-char error note.
+
 ### `POST /api/webhooks/stripe`
 Payment settlement authority (`PAY-01`). Requires header `Stripe-Signature: t=<unix_ts>,v1=<hex_hmac_sha256>` signed with `STRIPE_WEBHOOK_SECRET` over `<unix_ts>.<raw_body>`.
 - Accepts either a standard Stripe Event envelope (`id`, `type` in `payment_intent.succeeded | checkout.session.completed | charge.succeeded`, `data.object.metadata.order_code`, `data.object.amount_total | amount_received | amount`, `data.object.currency`) or a flat JSON body (`event_id`, `event_type`, `order_code`, `amount_cents`, `currency`).
-- **Response `200 OK`**: `{"ok": true, "idempotent": false, "status": "paid"}`
+- **Response `200 OK`**: `{"ok": true, "idempotent": false, "status": "paid", "order_code": "ORD-…", "customer_name": "…", "customer_email": "…", "locale": "en", "paid_email_sent": false}` — the metadata tells the web tier whom to email, in which language, and whether the paid-confirmation email is already recorded as delivered (`paid_email_sent`).
 
 ---
 
@@ -208,6 +226,8 @@ Payment settlement authority (`PAY-01`). Requires header `Stripe-Signature: t=<u
 All non-`GET` requests under `/api/admin/*` require header `X-Requested-With: XMLHttpRequest` (or any non-empty value). All routes except `/api/admin/login` require cookie `admin_session=<signed_token>`.
 
 - `POST /api/admin/login` — Body: `{"username": "...", "password": "..."}` -> `200 OK` `{"ok": true}` + `Set-Cookie: admin_session=...; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`
+- `POST /api/admin/logout` -> `200 OK` `{"ok": true}` + `Set-Cookie: admin_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0` (clears the cookie). SERVER-SIDE revocation: the token's SHA-256 is recorded in `revoked_admin_sessions` (never the token itself) and `require_admin` refuses the token from that moment on — a stolen cookie dies at logout, not at `exp`. The revocation check FAILS CLOSED: any database error (including a missing `revoked_admin_sessions` table) answers `503` instead of letting a possibly-revoked session through.
+- Session token claims: `{"sub": <username>, "exp": <unix seconds>, "jti": <timestamp-micros hex + counter>}` — the `jti` makes every login token unique even within the same second (two logins never share one token or one revocation-ledger row); tokens minted before `jti` remain valid until their own `exp`.
 - `GET /api/admin/whoami` -> `200 OK` `{"username": "..."}`
 - `GET /api/admin/products` -> `200 OK` `AdminProduct[]` (all products, active & inactive)
 - `POST /api/admin/products` -> Create product (`slug`, `brand`, `model`, `price_cents`, `family`, `art_variant`, `art_hue`, `active`)

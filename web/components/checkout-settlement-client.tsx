@@ -105,6 +105,9 @@ export default function CheckoutSettlementClient({
   // Email preview modal
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  // Two-step inline confirmation (G23) for the destructive self-service
+  // cancel: the first click only arms the action, the second executes it.
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -171,7 +174,9 @@ export default function CheckoutSettlementClient({
     const found =
       allProducts.find((p) => p.slug === it.product_slug) ??
       (product?.slug === it.product_slug ? product : null);
-    const copy = found?.content[lang] ?? found?.content.en ?? {};
+    // LANG-01: strictly locale-specific copy — `zh-HK` never falls back to
+    // English product copy.
+    const copy = found?.content[lang] ?? {};
     const title = found
       ? formatProductTitle(found.model, copy.model_alt, copy.colourway, lang)
       : it.product_slug;
@@ -327,6 +332,11 @@ export default function CheckoutSettlementClient({
 
   async function handleCancelHold() {
     if (cancelling) return;
+    if (!confirmCancel) {
+      setConfirmCancel(true);
+      return;
+    }
+    setConfirmCancel(false);
     setCancelling(true);
     try {
       const res = await fetch(
@@ -822,28 +832,54 @@ export default function CheckoutSettlementClient({
               </div>
             )}
 
-            {/* Self-Service Cancel Hold Button while Reserved */}
+            {/* Self-Service Cancel Hold Button while Reserved (2-step confirm) */}
             {isReserved && (
-              <div className="no-print mt-8 flex items-center justify-between border-t border-[var(--border-hairline)] pt-5 text-xs">
-                <span className="text-[var(--text-secondary)]">
-                  {lang === "zh-HK"
-                    ? "需要更改付款方式或釋放留貨配額？"
-                    : "Need to switch payment method or release this hold?"}
-                </span>
-                <button
-                  type="button"
-                  disabled={cancelling}
-                  onClick={handleCancelHold}
-                  className="border border-[var(--border-hairline)] px-3.5 py-1.5 text-xs uppercase text-[var(--text-secondary)] hover:border-[var(--color-error)] hover:text-[var(--color-error)]"
-                >
-                  {cancelling
-                    ? lang === "zh-HK"
-                      ? "取消中..."
-                      : "Cancelling..."
-                    : lang === "zh-HK"
-                      ? "取消留貨並釋放配額"
-                      : "Cancel Hold & Release Stock"}
-                </button>
+              <div className="no-print mt-8 border-t border-[var(--border-hairline)] pt-5 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-[var(--text-secondary)]">
+                    {confirmCancel
+                      ? lang === "zh-HK"
+                        ? "確定取消留貨？此操作無法復原，配額將立即釋放回香港存倉。"
+                        : "Confirm cancellation? This cannot be undone — the units return to the Hong Kong vault immediately."
+                      : lang === "zh-HK"
+                        ? "需要更改付款方式或釋放留貨配額？"
+                        : "Need to switch payment method or release this hold?"}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {confirmCancel && (
+                      <button
+                        type="button"
+                        disabled={cancelling}
+                        onClick={() => setConfirmCancel(false)}
+                        className="border border-[var(--border-hairline)] px-3.5 py-1.5 text-xs uppercase text-[var(--text-secondary)] transition-colors hover:border-[var(--text-primary)] hover:text-[var(--text-primary)]"
+                      >
+                        {lang === "zh-HK" ? "保留留貨" : "Keep My Hold"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={cancelling}
+                      onClick={handleCancelHold}
+                      className={`border px-3.5 py-1.5 text-xs uppercase transition-colors ${
+                        confirmCancel
+                          ? "border-[var(--color-error)] bg-[var(--color-error)] text-white"
+                          : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:border-[var(--color-error)] hover:text-[var(--color-error)]"
+                      }`}
+                    >
+                      {cancelling
+                        ? lang === "zh-HK"
+                          ? "取消中..."
+                          : "Cancelling..."
+                        : confirmCancel
+                          ? lang === "zh-HK"
+                            ? "確認取消並釋放配額"
+                            : "Yes — Cancel & Release"
+                          : lang === "zh-HK"
+                            ? "取消留貨並釋放配額"
+                            : "Cancel Hold & Release Stock"}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 

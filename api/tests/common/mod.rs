@@ -107,6 +107,7 @@ const MIGRATIONS: &[&str] = &[
     "0005_flagship_media_specs.sql",
     "0006_orders_reservations.sql",
     "0007_multi_sku_fps_media.sql",
+    "0008_payment_email_session_hardening.sql",
 ];
 
 /// Where the migration files live on disk, resolved at compile time so the
@@ -806,6 +807,7 @@ pub fn admin_router_with_observer(
 ) -> Router {
     let routes: Router<AppState> = Router::new()
         .route("/whoami", get(admin::whoami))
+        .route("/logout", post(admin::logout))
         .route(
             "/products",
             get(admin_crud::list_products).post(admin_crud::create_product),

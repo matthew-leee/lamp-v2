@@ -24,12 +24,15 @@ interface AdminOrderRow {
   total_cents: number;
   currency: string;
   payment_method: string;
+  locale: string;
   status: string;
   customer_name: string;
   customer_email: string;
   customer_phone: string;
   delivery_address: string;
   fps_reference: string;
+  paid_email_sent_at: string | null;
+  email_last_error: string;
   expires_at: string;
   created_at: string;
   items?: AdminOrderItemRow[];
@@ -149,8 +152,16 @@ export default async function AdminOrdersPage({
                     >
                       {row.order_code} ↗
                     </Link>
-                    <div className="mt-0.5 text-xs text-[var(--text-secondary)]">
-                      #{row.id} · Exp: {row.expires_at.slice(0, 19).replace("T", " ")}
+                    <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-[var(--text-secondary)]">
+                      <span>
+                        #{row.id} · Exp: {row.expires_at.slice(0, 19).replace("T", " ")}
+                      </span>
+                      <span
+                        className="border border-[var(--border-hairline)] px-1.5 py-0.5 font-mono text-[10px] uppercase"
+                        title="Customer language used for transactional email"
+                      >
+                        {row.locale === "zh-HK" ? "ZH-HK" : "EN"}
+                      </span>
                     </div>
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">
@@ -206,6 +217,41 @@ export default async function AdminOrdersPage({
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex flex-col gap-2">
+                      {/* Durable paid-email delivery ledger (findings G02) */}
+                      <div className="text-[11px] leading-relaxed">
+                        {row.paid_email_sent_at ? (
+                          <span className="text-[var(--color-success)]">
+                            ✓ Receipt sent{" "}
+                            {row.paid_email_sent_at.slice(0, 16).replace("T", " ")}
+                          </span>
+                        ) : row.email_last_error ? (
+                          <span className="text-[var(--color-error)]">
+                            ✗ Email failed: {row.email_last_error}
+                          </span>
+                        ) : (
+                          <span className="text-[var(--text-secondary)]">
+                            Email: not yet sent
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Re-send is only truthful for live orders: reserved
+                          (hold confirmation) / paid / fulfilled (receipt). */}
+                      {(row.status === "reserved" ||
+                        row.status === "paid" ||
+                        row.status === "fulfilled") && (
+                        <form method="post" action={`/admin/api/orders/${row.id}`}>
+                          <button
+                            type="submit"
+                            name="action"
+                            value="resend_receipt"
+                            className="border border-[var(--border-hairline)] px-2.5 py-1 text-xs uppercase hover:border-[var(--color-glow)]"
+                          >
+                            Re-send Receipt
+                          </button>
+                        </form>
+                      )}
+
                       {row.payment_method === "fps" &&
                         (row.status === "reserved" || row.status === "expired") && (
                           <form

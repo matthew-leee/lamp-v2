@@ -101,6 +101,13 @@ pub struct OrderItem {
 /// requests (`CART-01`). `quantity`, `customer_phone` and `delivery_address`
 /// may be omitted (defaults below). No price field exists here on purpose —
 /// see the module docs: money comes from the DB.
+///
+/// `locale` remembers the customer's storefront language ("en" / "zh-HK",
+/// LANG-01) on the order row so every later email speaks it; `idempotency_key`
+/// is the client-side identity of ONE pay attempt ("one order per pay tap",
+/// findings G01): replaying the same key returns the first order instead of a
+/// second stock-holding ghost. The `Idempotency-Key` HTTP header is the
+/// fallback when the body carries none.
 #[derive(Debug, Deserialize)]
 pub struct CreateReservationRequest {
     #[serde(default)]
@@ -116,14 +123,25 @@ pub struct CreateReservationRequest {
     pub customer_phone: String,
     #[serde(default)]
     pub delivery_address: String,
+    #[serde(default = "default_locale")]
+    pub locale: String,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 fn default_quantity() -> i32 {
     1
 }
 
+fn default_locale() -> String {
+    "en".to_string()
+}
+
 /// `POST /api/orders/reserve` response — the created reservation, including
-/// all line items (`items`).
+/// all line items (`items`). `idempotent_replay` is `false` on a fresh insert
+/// and `true` when this answer is a REPLAY of an earlier attempt loaded via
+/// `load_order_response_by_idempotency_key` — the web tier must not dispatch
+/// a second reservation email for a replay.
 #[derive(Debug, Serialize)]
 pub struct OrderResponse {
     pub id: i64,
@@ -135,12 +153,14 @@ pub struct OrderResponse {
     pub total_cents: i64,
     pub currency: String,
     pub payment_method: String,
+    pub locale: String,
     pub status: String,
     pub customer_name: String,
     pub customer_email: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub items: Vec<OrderItem>,
+    pub idempotent_replay: bool,
 }
 
 /// `GET /api/orders/{order_code}` response — the PUBLIC order status: no
@@ -154,6 +174,7 @@ pub struct PublicOrderStatus {
     pub total_cents: i64,
     pub currency: String,
     pub payment_method: String,
+    pub locale: String,
     pub status: String,
     pub fps_reference: String,
     pub expires_at: DateTime<Utc>,
@@ -171,6 +192,7 @@ struct PublicOrderStatusRow {
     total_cents: i64,
     currency: String,
     payment_method: String,
+    locale: String,
     status: String,
     fps_reference: String,
     expires_at: DateTime<Utc>,
@@ -190,12 +212,15 @@ pub struct AdminOrder {
     pub total_cents: i64,
     pub currency: String,
     pub payment_method: String,
+    pub locale: String,
     pub status: String,
     pub customer_name: String,
     pub customer_email: String,
     pub customer_phone: String,
     pub delivery_address: String,
     pub fps_reference: String,
+    pub paid_email_sent_at: Option<DateTime<Utc>>,
+    pub email_last_error: String,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -213,12 +238,15 @@ struct AdminOrderRow {
     total_cents: i64,
     currency: String,
     payment_method: String,
+    locale: String,
     status: String,
     customer_name: String,
     customer_email: String,
     customer_phone: String,
     delivery_address: String,
     fps_reference: String,
+    paid_email_sent_at: Option<DateTime<Utc>>,
+    email_last_error: String,
     expires_at: DateTime<Utc>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -289,11 +317,61 @@ fn decode_stripe_payload(raw_body: &[u8]) -> Option<StripeWebhookPayload> {
 
 /// `POST /api/webhooks/stripe` response. `idempotent: true` means the event
 /// was already processed (PAY-01 replay) and NOTHING changed this time.
+/// The order metadata (`order_code`, `customer_*`, `locale`,
+/// `paid_email_sent`) tells the web tier whether the paid-confirmation email
+/// still needs to go out — `paid_email_sent` is `paid_email_sent_at IS NOT
+/// NULL` on the order row (the durable "customer was told" ledger).
 #[derive(Debug, Serialize)]
 pub struct WebhookResponse {
     pub ok: bool,
     pub idempotent: bool,
     pub status: String,
+    pub order_code: String,
+    pub customer_name: String,
+    pub customer_email: String,
+    pub locale: String,
+    pub paid_email_sent: bool,
+}
+
+/// `POST /api/orders/{order_code}/email-delivery` body: the web tier reports
+/// the OUTCOME of the paid-confirmation email attempt (`sent: true` = the
+/// mail gateway accepted it; `sent: false` + `error` = the failure reason),
+/// so duplicate sends can be avoided and failures stay visible to the admin
+/// "re-send receipt" surface (findings G02).
+///
+/// `claim: true` turns the call into an ATOMIC paid-email claim instead: it
+/// only reports success when this caller won the right to send the paid
+/// email (`claimed: true`), so concurrent settlement paths can never
+/// double-send it. The claim is a RECOVERABLE lease on the send
+/// (`paid_email_claimed_at`), never proof of delivery — `paid_email_sent_at`
+/// is only stamped when the actual dispatch succeeds.
+///
+/// `kind` names WHICH email this outcome belongs to: `"reservation"` (the
+/// hold confirmation) reports must never touch the PAID-email ledger beyond
+/// clearing `email_last_error`, while anything else (default: `"paid"`) is
+/// the paid receipt.
+#[derive(Debug, Deserialize)]
+pub struct EmailDeliveryRequest {
+    pub sent: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub claim: bool,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// `POST /api/orders/{order_code}/email-delivery` response: `paid_email_sent`
+/// is the order's post-update `paid_email_sent_at IS NOT NULL` state (the
+/// durable "the customer WAS told" ledger — a claim alone never sets it);
+/// `claimed: true` means THIS call atomically claimed the one paid-email send
+/// (`claim: true` request against a paid/fulfilled order whose paid email was
+/// not claimed/sent yet).
+#[derive(Debug, Serialize)]
+pub struct EmailDeliveryResponse {
+    pub ok: bool,
+    pub paid_email_sent: bool,
+    pub claimed: bool,
 }
 
 /// `POST /api/admin/orders/{id}/confirm-fps` body.
@@ -405,6 +483,9 @@ pub fn validate_reservation(req: &CreateReservationRequest) -> Result<(), String
     if !matches!(req.payment_method.as_str(), "card" | "fps") {
         return Err("payment_method must be \"card\" or \"fps\"".to_string());
     }
+    if !matches!(req.locale.as_str(), "en" | "zh-HK") {
+        return Err("locale must be \"en\" or \"zh-HK\"".to_string());
+    }
     if req.customer_name.trim().is_empty() {
         return Err("customer_name is required".to_string());
     }
@@ -417,6 +498,21 @@ pub fn validate_reservation(req: &CreateReservationRequest) -> Result<(), String
     reject_nul("customer_email", &req.customer_email)?;
     reject_nul("customer_phone", &req.customer_phone)?;
     reject_nul("delivery_address", &req.delivery_address)?;
+    // An idempotency key is OPTIONAL (older clients send none), but when
+    // present and non-blank it must be a usable ledger key: NUL-free (it is
+    // stored in TEXT) and bounded so one client cannot fill the unique index
+    // with megabyte keys. Blank/whitespace keys are treated as ABSENT by the
+    // normalizer — validation mirrors that (findings G01).
+    if let Some(key) = req
+        .idempotency_key
+        .as_deref()
+        .filter(|k| !k.trim().is_empty())
+    {
+        reject_nul("idempotency_key", key)?;
+        if key.trim().len() > 128 {
+            return Err("idempotency_key must be at most 128 characters".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -464,6 +560,14 @@ pub fn next_order_code() -> String {
 /// `order_code TEXT UNIQUE` column (0006). Anything else is a real failure.
 fn is_duplicate_order_code(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.constraint() == Some("orders_order_code_key"))
+}
+
+/// `orders_idempotency_key_key` is the constraint Postgres generates for the
+/// `idempotency_key TEXT UNIQUE` column (0008): two concurrent attempts of
+/// ONE pay tap both passed the pre-check, and the loser of the INSERT race
+/// must return the winner's order instead of failing (G01).
+fn is_duplicate_idempotency_key(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.constraint() == Some("orders_idempotency_key_key"))
 }
 
 // ---------------------------------------------------------------------------
@@ -795,6 +899,10 @@ struct LockedOrder {
     status: String,
     total_cents: i64,
     currency: String,
+    customer_name: String,
+    customer_email: String,
+    locale: String,
+    paid_email_sent_at: Option<DateTime<Utc>>,
 }
 
 async fn lock_order_by_code(
@@ -803,7 +911,8 @@ async fn lock_order_by_code(
 ) -> Result<Option<LockedOrder>, sqlx::Error> {
     sqlx::query_as::<_, LockedOrder>(
         "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
-             payment_method, status, total_cents, currency \
+             payment_method, status, total_cents, currency, customer_name, \
+             customer_email, locale, paid_email_sent_at \
          FROM orders WHERE order_code = $1 FOR UPDATE",
     )
     .bind(order_code)
@@ -817,7 +926,8 @@ async fn lock_order_by_id(
 ) -> Result<Option<LockedOrder>, sqlx::Error> {
     sqlx::query_as::<_, LockedOrder>(
         "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
-             payment_method, status, total_cents, currency \
+             payment_method, status, total_cents, currency, customer_name, \
+             customer_email, locale, paid_email_sent_at \
          FROM orders WHERE id = $1 FOR UPDATE",
     )
     .bind(id)
@@ -831,7 +941,7 @@ async fn load_public_order_tx(
 ) -> Result<Option<PublicOrderStatus>, sqlx::Error> {
     let row = sqlx::query_as::<_, PublicOrderStatusRow>(
         "SELECT id, order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
-             payment_method, status, fps_reference, expires_at, created_at \
+             payment_method, locale, status, fps_reference, expires_at, created_at \
          FROM orders WHERE order_code = $1",
     )
     .bind(order_code)
@@ -860,6 +970,7 @@ async fn load_public_order_tx(
         total_cents: row.total_cents,
         currency: row.currency,
         payment_method: row.payment_method,
+        locale: row.locale,
         status: row.status,
         fps_reference: row.fps_reference,
         expires_at: row.expires_at,
@@ -876,8 +987,9 @@ async fn load_admin_order(
 ) -> Result<Option<AdminOrder>, sqlx::Error> {
     let row = sqlx::query_as::<_, AdminOrderRow>(
         "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
-             total_cents, currency, payment_method, status, customer_name, customer_email, \
-             customer_phone, delivery_address, fps_reference, expires_at, created_at, updated_at \
+             total_cents, currency, payment_method, locale, status, customer_name, \
+             customer_email, customer_phone, delivery_address, fps_reference, \
+             paid_email_sent_at, email_last_error, expires_at, created_at, updated_at \
          FROM orders WHERE id = $1",
     )
     .bind(id)
@@ -908,16 +1020,95 @@ async fn load_admin_order(
         total_cents: row.total_cents,
         currency: row.currency,
         payment_method: row.payment_method,
+        locale: row.locale,
         status: row.status,
         customer_name: row.customer_name,
         customer_email: row.customer_email,
         customer_phone: row.customer_phone,
         delivery_address: row.delivery_address,
         fps_reference: row.fps_reference,
+        paid_email_sent_at: row.paid_email_sent_at,
+        email_last_error: row.email_last_error,
         expires_at: row.expires_at,
         created_at: row.created_at,
         updated_at: row.updated_at,
         items,
+    }))
+}
+
+/// The `orders` columns one reservation replay needs (findings G01: same pay
+/// attempt -> same order).
+#[derive(Debug, FromRow)]
+struct ReservationReplayRow {
+    id: i64,
+    order_code: String,
+    product_id: i64,
+    product_slug: String,
+    quantity: i32,
+    unit_price_cents: i64,
+    total_cents: i64,
+    currency: String,
+    payment_method: String,
+    locale: String,
+    status: String,
+    customer_name: String,
+    customer_email: String,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+}
+
+/// Loads the order a PREVIOUS reservation with this idempotency key created,
+/// with its line items, so a retried pay attempt answers with the original
+/// order and never reserves stock twice. Read-only: it runs OUTSIDE the
+/// reservation transaction on purpose — the caller may be a loser of the
+/// `orders_idempotency_key_key` race whose own transaction is aborted.
+async fn load_order_response_by_idempotency_key(
+    pool: &PgPool,
+    idempotency_key: &str,
+) -> Result<Option<OrderResponse>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query_as::<_, ReservationReplayRow>(
+        "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
+             total_cents, currency, payment_method, locale, status, customer_name, \
+             customer_email, expires_at, created_at \
+         FROM orders WHERE idempotency_key = $1",
+    )
+    .bind(idempotency_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let items = load_order_items_tx(
+        &mut tx,
+        row.id,
+        row.product_id,
+        &row.product_slug,
+        row.quantity,
+        row.unit_price_cents,
+        row.total_cents,
+    )
+    .await?;
+    Ok(Some(OrderResponse {
+        id: row.id,
+        order_code: row.order_code,
+        product_id: row.product_id,
+        product_slug: row.product_slug,
+        quantity: row.quantity,
+        unit_price_cents: row.unit_price_cents,
+        total_cents: row.total_cents,
+        currency: row.currency,
+        payment_method: row.payment_method,
+        locale: row.locale,
+        status: row.status,
+        customer_name: row.customer_name,
+        customer_email: row.customer_email,
+        expires_at: row.expires_at,
+        created_at: row.created_at,
+        items,
+        // A replayed pay attempt — the web tier must not send a second
+        // reservation email for an order the customer already knows about.
+        idempotent_replay: true,
     }))
 }
 
@@ -952,9 +1143,27 @@ async fn order_currency(
 /// taken from the locked product row.
 pub async fn create_reservation(
     State(app): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<CreateReservationRequest>, JsonRejection>,
 ) -> Result<Json<OrderResponse>, ApiError> {
-    let req = json_body(body)?;
+    let mut req = json_body(body)?;
+    // `Idempotency-Key` header fallback (findings G01): when the body carries
+    // no key (or only a blank one), the standard header names the pay attempt
+    // instead. The body field wins when both are present; blank keys on both
+    // sides mean "no idempotency" exactly like before.
+    if req
+        .idempotency_key
+        .as_deref()
+        .is_none_or(|key| key.trim().is_empty())
+    {
+        if let Some(key) = headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok())
+            .filter(|key| !key.trim().is_empty())
+        {
+            req.idempotency_key = Some(key.to_string());
+        }
+    }
     // Validation before ANY database work (see the module docs).
     if let Err(msg) = validate_reservation(&req) {
         return Err(bad_request(&msg));
@@ -1013,6 +1222,23 @@ async fn reserve_once(
 ) -> Result<Result<OrderResponse, ReserveRejection>, ReserveFailure> {
     let requested_items =
         normalized_reservation_items(req).map_err(|_| ReserveFailure::MoneyOverflow)?;
+    // One order per pay tap (findings G01): the key is normalised to its
+    // trimmed non-empty form (" key " and "key" are the same attempt), and a
+    // replay of a KNOWN key returns the first order before anything is
+    // locked — a retry must never reserve stock a second time.
+    let idempotency_key = req
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty());
+    if let Some(key) = idempotency_key {
+        if let Some(existing) = load_order_response_by_idempotency_key(pool, key)
+            .await
+            .map_err(ReserveFailure::Db)?
+        {
+            return Ok(Ok(existing));
+        }
+    }
     let mut tx = pool.begin().await.map_err(ReserveFailure::Db)?;
     expire_stale_reservations(&mut tx)
         .await
@@ -1056,6 +1282,20 @@ async fn reserve_once(
             - i64::from(product.stock_reserved)
             - i64::from(product.stock_quarantined);
         if available < i64::from(req_item.quantity) {
+            // Concurrent same-key retry on the LAST unit in stock: the other
+            // attempt of this very pay tap may have won the race between our
+            // early replay check and this availability check — look for the
+            // order this key created before refusing. The replay read runs
+            // OUTSIDE the transaction (it is about to return without commit).
+            if let Some(key) = idempotency_key {
+                drop(tx);
+                if let Some(existing) = load_order_response_by_idempotency_key(pool, key)
+                    .await
+                    .map_err(ReserveFailure::Db)?
+                {
+                    return Ok(Ok(existing));
+                }
+            }
             return Ok(Err(ReserveRejection::InsufficientStock));
         }
         let line_total_cents = order_total(product.price_cents, req_item.quantity)
@@ -1093,11 +1333,11 @@ async fn reserve_once(
     }
 
     let order_code = next_order_code();
-    let (id, created_at): (i64, DateTime<Utc>) = sqlx::query_as(
+    let inserted: Result<(i64, DateTime<Utc>), sqlx::Error> = sqlx::query_as(
         "INSERT INTO orders (order_code, product_id, product_slug, quantity, unit_price_cents, \
              total_cents, currency, payment_method, status, customer_name, customer_email, \
-             customer_phone, delivery_address, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10, $11, $12, $13) \
+             customer_phone, delivery_address, expires_at, locale, idempotency_key) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10, $11, $12, $13, $14, $15) \
          RETURNING id, created_at",
     )
     .bind(&order_code)
@@ -1113,15 +1353,34 @@ async fn reserve_once(
     .bind(&req.customer_phone)
     .bind(&req.delivery_address)
     .bind(expires_at)
+    .bind(&req.locale)
+    .bind(idempotency_key)
     .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| {
-        if is_duplicate_order_code(&e) {
-            ReserveFailure::DuplicateOrderCode
-        } else {
-            ReserveFailure::Db(e)
+    .await;
+    let (id, created_at) = match inserted {
+        Ok(row) => row,
+        Err(e) if is_duplicate_order_code(&e) => return Err(ReserveFailure::DuplicateOrderCode),
+        // Two concurrent attempts of ONE pay tap: the `idempotency_key`
+        // UNIQUE index picks the winner; the loser's transaction is aborted
+        // (its reserved units roll back with it) and it returns the WINNER's
+        // order — exactly one order and one stock hold per key (G01).
+        Err(e) if is_duplicate_idempotency_key(&e) => {
+            drop(tx);
+            let existing = match idempotency_key {
+                Some(key) => load_order_response_by_idempotency_key(pool, key)
+                    .await
+                    .map_err(ReserveFailure::Db)?,
+                None => None,
+            };
+            return match existing {
+                Some(order) => Ok(Ok(order)),
+                // The winning order vanished between the conflict and this
+                // read: surface the original failure, never invent a result.
+                None => Err(ReserveFailure::Db(e)),
+            };
         }
-    })?;
+        Err(e) => return Err(ReserveFailure::Db(e)),
+    };
 
     for item in &resolved_items {
         sqlx::query(
@@ -1152,12 +1411,14 @@ async fn reserve_once(
         total_cents,
         currency,
         payment_method: req.payment_method.clone(),
+        locale: req.locale.clone(),
         status: "reserved".to_string(),
         customer_name: req.customer_name.clone(),
         customer_email: req.customer_email.clone(),
         expires_at,
         created_at,
         items: resolved_items,
+        idempotent_replay: false,
     }))
 }
 
@@ -1273,6 +1534,11 @@ pub async fn stripe_webhook(
             ok: true,
             idempotent: true,
             status: order.status,
+            order_code: order.order_code.clone(),
+            customer_name: order.customer_name.clone(),
+            customer_email: order.customer_email.clone(),
+            locale: order.locale.clone(),
+            paid_email_sent: order.paid_email_sent_at.is_some(),
         }));
     }
 
@@ -1336,6 +1602,11 @@ pub async fn stripe_webhook(
         ok: true,
         idempotent: false,
         status: new_status.to_string(),
+        order_code: order.order_code.clone(),
+        customer_name: order.customer_name.clone(),
+        customer_email: order.customer_email.clone(),
+        locale: order.locale.clone(),
+        paid_email_sent: order.paid_email_sent_at.is_some(),
     }))
 }
 
@@ -1363,8 +1634,9 @@ pub async fn list_orders(
         .map_err(|e| state::database_unavailable("failed to open orders list", &e))?;
     let rows = sqlx::query_as::<_, AdminOrderRow>(
         "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, \
-             total_cents, currency, payment_method, status, customer_name, customer_email, \
-             customer_phone, delivery_address, fps_reference, expires_at, created_at, updated_at \
+             total_cents, currency, payment_method, locale, status, customer_name, \
+             customer_email, customer_phone, delivery_address, fps_reference, \
+             paid_email_sent_at, email_last_error, expires_at, created_at, updated_at \
          FROM orders ORDER BY created_at DESC, id DESC LIMIT 200",
     )
     .fetch_all(&mut *tx)
@@ -1394,12 +1666,15 @@ pub async fn list_orders(
             total_cents: row.total_cents,
             currency: row.currency,
             payment_method: row.payment_method,
+            locale: row.locale,
             status: row.status,
             customer_name: row.customer_name,
             customer_email: row.customer_email,
             customer_phone: row.customer_phone,
             delivery_address: row.delivery_address,
             fps_reference: row.fps_reference,
+            paid_email_sent_at: row.paid_email_sent_at,
+            email_last_error: row.email_last_error,
             expires_at: row.expires_at,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -1766,6 +2041,170 @@ pub async fn cancel_customer_order(
     Ok(Json(updated))
 }
 
+/// `POST /api/orders/{order_code}/email-delivery` — the web tier's durable
+/// record of the paid-confirmation email outcome (findings G02). The ledger
+/// separates RECOVERABLE claim state (`paid_email_claimed_at`: "a send is in
+/// flight") from CONFIRMED delivery (`paid_email_sent_at`: "the customer was
+/// told"), so a crash mid-dispatch can never fake — or block — a delivery.
+/// Every send path (webhook settlement, session-verify return, direct card,
+/// admin FPS confirmation, admin re-send) claims here before sending and
+/// reports the outcome afterwards, so no customer gets two receipts and no
+/// failure disappears silently.
+///
+/// Four call shapes share this one endpoint:
+/// * `claim: true` — ATOMICALLY win the one paid-email send: only a
+///   `paid`/`fulfilled` order whose `paid_email_sent_at IS NULL` and whose
+///   claim is free (never taken, or the 2-minute lease expired) can be
+///   claimed, and only one caller ever gets `claimed: true`. The claim is
+///   taken BEFORE the dispatch so concurrent settlement paths (webhook +
+///   return + admin) can never double-send. A won claim reports
+///   `paid_email_sent: false` — the claim is a lease, NOT delivery proof;
+///   only a successful dispatch stamps `paid_email_sent_at`.
+/// * `sent: true` + `kind: "reservation"` — the hold-confirmation email was
+///   delivered: clear `email_last_error` ONLY. It must never touch
+///   `paid_email_sent_at` (the PAID email ledger) — not even on an order
+///   that later settled.
+/// * `sent: true` (any other kind) — the paid receipt was delivered:
+///   stamp `paid_email_sent_at` ONLY when the order is `paid`/`fulfilled`
+///   (COALESCE'd so a repeat can never move the first moment) and release
+///   the claim.
+/// * `sent: false` — an attempt failed after claiming (or a manual re-send
+///   failed later): RELEASE the claim (`paid_email_claimed_at = NULL`) and
+///   record `email_last_error`, so a retry or the admin re-send can still
+///   succeed. An already-confirmed `paid_email_sent_at` is NEVER wiped by a
+///   later failed re-send.
+///
+/// Deliberately NO reservation sweep and no state transition: this is
+/// delivery bookkeeping on whatever state the order is in — flipping
+/// `expired -> paid` or releasing holds here would mix concerns.
+pub async fn record_email_delivery(
+    State(app): State<AppState>,
+    Path(order_code): Path<String>,
+    body: Result<Json<EmailDeliveryRequest>, JsonRejection>,
+) -> Result<Json<EmailDeliveryResponse>, ApiError> {
+    let body = json_body(body)?;
+    // The failure note is stored TEXT: NUL-free (or the DB would answer 503
+    // to a client mistake) and bounded (one stuck retry loop must not write
+    // megabytes per failure).
+    if let Some(error_note) = body.error.as_deref() {
+        if let Err(msg) = reject_nul("error", error_note) {
+            return Err(bad_request(&msg));
+        }
+        if error_note.len() > 2000 {
+            return Err(bad_request("error must be at most 2000 characters"));
+        }
+    }
+    let pool = state::require_pool(&app)?;
+    let error_note = body.error.unwrap_or_default();
+
+    // CLAIM: atomically win the right to send THE paid email exactly once.
+    // `paid_email_claimed_at` is a 2-minute RECOVERABLE lease on the send,
+    // not delivery proof: a web tier that dies mid-dispatch frees the send
+    // after the lease instead of blocking the receipt forever, while a live
+    // lease keeps concurrent settlement paths silent.
+    if body.claim {
+        let claimed: Option<(String,)> = sqlx::query_as(
+            "UPDATE orders SET paid_email_claimed_at = now(), updated_at = now() \
+             WHERE order_code = $1 \
+               AND status IN ('paid', 'fulfilled') \
+               AND paid_email_sent_at IS NULL \
+               AND (paid_email_claimed_at IS NULL \
+                    OR paid_email_claimed_at <= now() - interval '2 minutes') \
+             RETURNING order_code",
+        )
+        .bind(&order_code)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| state::database_unavailable("failed to claim paid email delivery", &e))?;
+        if claimed.is_some() {
+            // The claim is a lease, never proof of delivery: the paid email
+            // has NOT gone out yet — `paid_email_sent_at` stays NULL until
+            // the claimed dispatch actually succeeds.
+            return Ok(Json(EmailDeliveryResponse {
+                ok: true,
+                paid_email_sent: false,
+                claimed: true,
+            }));
+        }
+        // Nothing claimed — already claimed/sent, or the order is not paid:
+        // report the ledger state unchanged (404 only for an unknown order).
+        let current: Option<(bool,)> = sqlx::query_as(
+            "SELECT (paid_email_sent_at IS NOT NULL) FROM orders WHERE order_code = $1",
+        )
+        .bind(&order_code)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| state::database_unavailable("failed to read email delivery ledger", &e))?;
+        let Some((paid_email_sent,)) = current else {
+            return Err(not_found("order not found"));
+        };
+        return Ok(Json(EmailDeliveryResponse {
+            ok: true,
+            paid_email_sent,
+            claimed: false,
+        }));
+    }
+
+    // `(statement, uses_$2)`: reservation-kind outcomes never touch the
+    // paid-email claim or sent timestamp, whether `sent` is true or false.
+    let (update_sql, binds_error_note) = if body.kind.as_deref() == Some("reservation") {
+        let sql = if body.sent {
+            "UPDATE orders SET email_last_error = '', updated_at = now() \
+                 WHERE order_code = $1 \
+                 RETURNING (paid_email_sent_at IS NOT NULL)"
+        } else {
+            "UPDATE orders SET email_last_error = $2, updated_at = now() \
+                 WHERE order_code = $1 \
+                 RETURNING (paid_email_sent_at IS NOT NULL)"
+        };
+        (sql, !body.sent)
+    } else if body.sent {
+        // The PAID receipt was delivered: stamp the delivery moment ONLY for
+        // a settled order (re-sending a hold email on a `reserved` order must
+        // never record the PAID email as sent) and release the claim.
+        (
+            "UPDATE orders SET \
+                     paid_email_sent_at = CASE WHEN status IN ('paid', 'fulfilled') \
+                         THEN COALESCE(paid_email_sent_at, now()) ELSE paid_email_sent_at END, \
+                     paid_email_claimed_at = NULL, \
+                     email_last_error = $2, updated_at = now() \
+                 WHERE order_code = $1 \
+                 RETURNING (paid_email_sent_at IS NOT NULL)",
+            true,
+        )
+    } else {
+        // An attempt failed (claimed automatic send, or a later manual
+        // re-send): RELEASE the claim and keep the failure reason, so a
+        // retry or the admin re-send surface can still reach the customer.
+        // An already-confirmed `paid_email_sent_at` is deliberately NOT
+        // wiped — one failed re-send must never un-tell a customer who was
+        // already told.
+        (
+            "UPDATE orders SET paid_email_claimed_at = NULL, email_last_error = $2, \
+                     updated_at = now() \
+                 WHERE order_code = $1 \
+                 RETURNING (paid_email_sent_at IS NOT NULL)",
+            true,
+        )
+    };
+    let mut update = sqlx::query_as::<_, (bool,)>(update_sql).bind(&order_code);
+    if binds_error_note {
+        update = update.bind(&error_note);
+    }
+    let updated: Option<(bool,)> = update
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| state::database_unavailable("failed to record email delivery", &e))?;
+    let Some((paid_email_sent,)) = updated else {
+        return Err(not_found("order not found"));
+    };
+    Ok(Json(EmailDeliveryResponse {
+        ok: true,
+        paid_email_sent,
+        claimed: false,
+    }))
+}
+
 /// `POST /api/admin/orders/{id}/fulfil` — marks a `paid` order as `fulfilled`
 /// once dispatched or handed over to the collector.
 pub async fn fulfil_order(
@@ -1855,6 +2294,8 @@ mod tests {
             customer_email: "ada@example.com".to_string(),
             customer_phone: "+852 0000 0000".to_string(),
             delivery_address: "1 Test Road".to_string(),
+            locale: "en".to_string(),
+            idempotency_key: None,
         }
     }
 
@@ -1889,7 +2330,79 @@ mod tests {
         assert_eq!(parsed.quantity, 1);
         assert_eq!(parsed.customer_phone, "");
         assert_eq!(parsed.delivery_address, "");
+        assert_eq!(parsed.locale, "en");
+        assert_eq!(parsed.idempotency_key, None);
         assert_eq!(validate_reservation(&parsed), Ok(()));
+    }
+
+    #[test]
+    fn validate_reservation_checks_locale_and_idempotency_key() {
+        // Locale is the LANG-01 pair only: a typo must never silently send
+        // the wrong-language receipt (0008 CHECK mirrors this rule).
+        let mut req = request();
+        req.locale = "zh-HK".to_string();
+        assert_eq!(validate_reservation(&req), Ok(()));
+        for bad_locale in ["fr", "EN", "zh-hk", "zh-HK ", ""] {
+            req.locale = bad_locale.to_string();
+            assert_eq!(
+                validate_reservation(&req),
+                Err("locale must be \"en\" or \"zh-HK\"".to_string()),
+                "{bad_locale:?}"
+            );
+        }
+
+        // Idempotency key is OPTIONAL and blank means absent (the same rule
+        // the normalizer applies).
+        req = request();
+        for absent in [None, Some(""), Some("   ")] {
+            req.idempotency_key = absent.map(str::to_string);
+            assert_eq!(validate_reservation(&req), Ok(()), "{absent:?}");
+        }
+        // A present key is NUL-free and bounded after trimming.
+        req.idempotency_key = Some("  pay-attempt-1  ".to_string());
+        assert_eq!(validate_reservation(&req), Ok(()));
+        req.idempotency_key = Some("x".repeat(128));
+        assert_eq!(validate_reservation(&req), Ok(()));
+        req.idempotency_key = Some(" ".repeat(4) + &"x".repeat(125));
+        assert_eq!(validate_reservation(&req), Ok(()));
+        req.idempotency_key = Some("x".repeat(129));
+        assert_eq!(
+            validate_reservation(&req),
+            Err("idempotency_key must be at most 128 characters".to_string())
+        );
+        req.idempotency_key = Some(format!("{}{}", " ".repeat(4), "x".repeat(129)));
+        assert_eq!(
+            validate_reservation(&req),
+            Err("idempotency_key must be at most 128 characters".to_string())
+        );
+        req.idempotency_key = Some("a\u{0}b".to_string());
+        assert_eq!(
+            validate_reservation(&req),
+            Err("idempotency_key contains a NUL byte".to_string())
+        );
+    }
+
+    #[test]
+    fn email_delivery_request_defaults_error_to_none_and_claim_to_false() {
+        let parsed: EmailDeliveryRequest =
+            serde_json::from_str(r#"{"sent":true}"#).expect("body must parse");
+        assert!(parsed.sent);
+        assert_eq!(parsed.error, None);
+        assert!(!parsed.claim, "claim must default to false");
+        assert_eq!(parsed.kind, None, "kind must default to none (paid)");
+
+        let claim: EmailDeliveryRequest =
+            serde_json::from_str(r#"{"claim":true,"sent":false}"#).expect("claim body must parse");
+        assert!(claim.claim);
+        assert!(!claim.sent);
+        assert_eq!(claim.error, None);
+        assert_eq!(claim.kind, None);
+
+        let reservation: EmailDeliveryRequest =
+            serde_json::from_str(r#"{"sent":true,"kind":"reservation"}"#)
+                .expect("reservation outcome body must parse");
+        assert!(reservation.sent);
+        assert_eq!(reservation.kind.as_deref(), Some("reservation"));
     }
 
     #[test]
@@ -2303,24 +2816,36 @@ mod tests {
 
     #[test]
     fn webhook_response_serialises_the_idempotency_contract() {
-        // PAY-01: the replay answer is exactly this shape.
+        // PAY-01: the replay answer is exactly this shape — including the
+        // email-metadata fields the web tier needs to avoid duplicate sends
+        // and to know whom to tell (findings G02).
         let replay = WebhookResponse {
             ok: true,
             idempotent: true,
             status: "paid".to_string(),
+            order_code: "ORD-1-2".to_string(),
+            customer_name: "Ada Buyer".to_string(),
+            customer_email: "ada@example.com".to_string(),
+            locale: "zh-HK".to_string(),
+            paid_email_sent: false,
         };
         assert_eq!(
             serde_json::to_string(&replay).unwrap(),
-            r#"{"ok":true,"idempotent":true,"status":"paid"}"#
+            r#"{"ok":true,"idempotent":true,"status":"paid","order_code":"ORD-1-2","customer_name":"Ada Buyer","customer_email":"ada@example.com","locale":"zh-HK","paid_email_sent":false}"#
         );
         let applied = WebhookResponse {
             ok: true,
             idempotent: false,
             status: "late_payment_review".to_string(),
+            order_code: "ORD-3-4".to_string(),
+            customer_name: "Chan Tai Man".to_string(),
+            customer_email: "chan@example.com".to_string(),
+            locale: "en".to_string(),
+            paid_email_sent: true,
         };
         assert_eq!(
             serde_json::to_string(&applied).unwrap(),
-            r#"{"ok":true,"idempotent":false,"status":"late_payment_review"}"#
+            r#"{"ok":true,"idempotent":false,"status":"late_payment_review","order_code":"ORD-3-4","customer_name":"Chan Tai Man","customer_email":"chan@example.com","locale":"en","paid_email_sent":true}"#
         );
     }
 }

@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { isLocale, t, ui, type Locale } from "@/lib/i18n";
+import { loadRecentOrder, type RecentOrder } from "@/lib/recent-order";
 
 export default function OrderLookupPage() {
   const params = useParams<{ lang?: string }>();
@@ -14,6 +15,13 @@ export default function OrderLookupPage() {
   const [orderCode, setOrderCode] = useState("");
   const [checking, setChecking] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [recentOrder, setRecentOrder] = useState<RecentOrder | null>(null);
+
+  // One-click recovery (findings G01): the checkout clients remember the last
+  // order they created so a dropped connection never strands the buyer.
+  useEffect(() => {
+    setRecentOrder(loadRecentOrder());
+  }, []);
 
   async function handleLookup(e: FormEvent) {
     e.preventDefault();
@@ -67,6 +75,25 @@ export default function OrderLookupPage() {
             ? "輸入你的訂單編號（例如 ORD-...）以查看即時留貨倒數、完成信用卡付款、提交轉數快參考編號或列印官方典藏證書。"
             : "Enter your Order Reference (e.g. ORD-...) to view your live hold timer, settle card payment, submit an FPS transfer reference, or print your official Collector's Pass."}
         </p>
+
+        {recentOrder && (
+          <button
+            type="button"
+            onClick={() =>
+              router.push(
+                `/${lang}/checkout/${encodeURIComponent(recentOrder.order_code)}`,
+              )
+            }
+            className="mt-5 flex w-full items-center justify-between border border-[var(--color-glow)] bg-[var(--surface-elevated)] px-4 py-3 text-left text-xs transition-colors hover:border-[var(--text-primary)]"
+          >
+            <span>
+              {lang === "zh-HK"
+                ? `繼續最近訂單 ${recentOrder.order_code}`
+                : `Resume recent order ${recentOrder.order_code}`}
+            </span>
+            <span aria-hidden="true">→</span>
+          </button>
+        )}
 
         {errorMsg && (
           <div

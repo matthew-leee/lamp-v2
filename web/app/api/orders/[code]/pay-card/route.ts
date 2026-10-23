@@ -2,110 +2,90 @@ import crypto from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { getApiBaseUrl, loadStorefrontData } from "@/lib/api";
 import {
-  buildOrderEmailHtml,
+  claimPaidOrderEmail,
   dispatchTransactionalEmail,
-  type EmailOrderItemSummary,
+  recordOrderEmailDelivery,
 } from "@/lib/email-receipt";
+import {
+  buildOrderReceiptEmail,
+  type ReceiptOrderLike,
+} from "@/lib/order-email";
 import { formatProductTitle } from "@/lib/format";
 import { isLocale, type Locale } from "@/lib/i18n";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * `webhookData.locale` is the language the buyer used when ordering (stored
+ * on the order row, findings G02); the request locale is only the fallback.
+ */
+function resolveEmailLocale(
+  candidate: string | undefined,
+  fallback: Locale,
+): Locale {
+  return typeof candidate === "string" && isLocale(candidate)
+    ? candidate
+    : fallback;
+}
+
 async function sendPaidConfirmationIfSettled(opts: {
   orderCode: string;
   recipientEmail?: string;
   locale: Locale;
-  idempotent?: boolean;
+  alreadySent?: boolean;
 }) {
-  if (opts.idempotent) return;
+  // `alreadySent` is the durable delivery-ledger answer
+  // (`paid_email_sent_at IS NOT NULL`): never send a second receipt to a
+  // customer who was already told their payment landed (findings G02).
+  if (opts.alreadySent) return;
   try {
+    const apiBase = getApiBaseUrl();
     const [orderRes, storefront] = await Promise.all([
-      fetch(`${getApiBaseUrl()}/api/orders/${encodeURIComponent(opts.orderCode)}`, {
+      fetch(`${apiBase}/api/orders/${encodeURIComponent(opts.orderCode)}`, {
         cache: "no-store",
       }),
       loadStorefrontData(),
     ]);
     if (!orderRes.ok) return;
-    const order = (await orderRes.json()) as {
-      order_code: string;
-      product_slug: string;
-      quantity: number;
-      unit_price_cents: number;
-      total_cents: number;
-      currency: string;
-      payment_method: string;
-      status: string;
-      fps_reference: string;
-      expires_at: string;
-      created_at: string;
-      items?: Array<{
-        product_slug: string;
-        quantity: number;
-        unit_price_cents: number;
-        line_total_cents: number;
-      }>;
-    };
+    const order = (await orderRes.json()) as ReceiptOrderLike;
     if (order.status !== "paid" && order.status !== "fulfilled") return;
 
-    const { catalogue, config } = storefront;
-    const rawItems =
-      order.items && order.items.length > 0
-        ? order.items
-        : [
-            {
-              product_slug: order.product_slug,
-              quantity: order.quantity,
-              unit_price_cents: order.unit_price_cents,
-              line_total_cents: order.total_cents,
-            },
-          ];
+    // Exactly-once dispatch (G02): only the atomic paid-email claim winner
+    // may send — a concurrent settlement path may have got there first.
+    const claimed = await claimPaidOrderEmail(apiBase, order.order_code);
+    if (!claimed) return;
 
-    const itemSummaries: EmailOrderItemSummary[] = rawItems.map((it) => {
-      const p = catalogue.products.find((cp) => cp.slug === it.product_slug);
-      const copy = p?.content[opts.locale] ?? {};
-      const title = p
-        ? formatProductTitle(p.model, copy.model_alt, copy.colourway, opts.locale)
-        : it.product_slug;
-      return {
-        productTitle: title,
-        productSlug: it.product_slug,
-        quantity: it.quantity,
-        unitPriceCents: it.unit_price_cents,
-        lineTotalCents: it.line_total_cents,
-      };
-    });
-
-    const prod = catalogue.products.find((p) => p.slug === order.product_slug);
-    const copy = prod?.content[opts.locale] ?? {};
-    const title = prod
-      ? formatProductTitle(prod.model, copy.model_alt, copy.colourway, opts.locale)
-      : order.product_slug;
-
-    const receipt = buildOrderEmailHtml({
-      orderCode: order.order_code,
-      status: order.status,
-      paymentMethod: order.payment_method,
-      productTitle: title,
-      productSlug: order.product_slug,
-      quantity: order.quantity,
-      unitPriceCents: order.unit_price_cents,
-      totalCents: order.total_cents,
-      currency: order.currency,
-      items: itemSummaries,
-      fpsReference: order.fps_reference,
-      expiresAt: order.expires_at,
-      createdAt: order.created_at,
-      brandName: config.brandName,
-      siteUrl: config.siteUrl,
-      locale: opts.locale,
-    });
-
-    await dispatchTransactionalEmail({
-      to: opts.recipientEmail,
-      subject: receipt.subject,
-      html: receipt.html,
-      brandName: config.brandName,
-    });
+    // Claim won: ANY failure from here on must RELEASE the claim through the
+    // delivery ledger (try/catch claim release), or the receipt would stay
+    // "in flight" until the claim lease expires instead of being retried.
+    try {
+      const { catalogue, config } = storefront;
+      const receipt = buildOrderReceiptEmail(
+        order,
+        catalogue,
+        config,
+        opts.locale,
+      );
+      const result = await dispatchTransactionalEmail({
+        to: opts.recipientEmail,
+        subject: receipt.subject,
+        html: receipt.html,
+        brandName: config.brandName,
+      });
+      // Record the outcome: `dispatched: false` RELEASES the claim and stores
+      // the failure reason so "Re-send Receipt" can repair it.
+      await recordOrderEmailDelivery(apiBase, order.order_code, result);
+    } catch (err) {
+      console.error("[pay-card/route] Paid confirmation dispatch error:", err);
+      await recordOrderEmailDelivery(apiBase, order.order_code, {
+        dispatched: false,
+        transport: "preview-only",
+        detail:
+          err instanceof Error
+            ? err.message
+            : "Paid confirmation dispatch error",
+      });
+    }
   } catch (err) {
     console.error("[pay-card/route] Paid confirmation email error:", err);
   }
@@ -318,6 +298,19 @@ export async function POST(
         );
       }
 
+      // STRIPE-01: the settled session must match the DB-authoritative order
+      // amount and currency before any settlement message is forwarded.
+      if (
+        sessionObj.amount_total !== order.total_cents ||
+        (sessionObj.currency ?? "").toLowerCase() !==
+          order.currency.toLowerCase()
+      ) {
+        return Response.json(
+          { error: "Stripe session amount or currency mismatch" },
+          { status: 400 },
+        );
+      }
+
       const webhookSecret =
         process.env.STRIPE_WEBHOOK_SECRET?.trim() ||
         "whsec_test_secret_0123456789abcdef";
@@ -351,6 +344,10 @@ export async function POST(
       const webhookData = (await webhookRes.json().catch(() => ({}))) as {
         idempotent?: boolean;
         status?: string;
+        customer_email?: string;
+        customer_name?: string;
+        locale?: string;
+        paid_email_sent?: boolean;
       };
       revalidatePath("/", "layout");
 
@@ -358,9 +355,11 @@ export async function POST(
         await sendPaidConfirmationIfSettled({
           orderCode: order.order_code,
           recipientEmail:
-            sessionObj.customer_details?.email ?? body.customerEmail,
-          locale,
-          idempotent: webhookData.idempotent,
+            webhookData.customer_email ||
+            sessionObj.customer_details?.email ||
+            body.customerEmail,
+          locale: resolveEmailLocale(webhookData.locale, locale),
+          alreadySent: webhookData.paid_email_sent,
         });
       }
 
@@ -484,6 +483,10 @@ export async function POST(
   const webhookData = (await webhookRes.json().catch(() => ({}))) as {
     idempotent?: boolean;
     status?: string;
+    customer_email?: string;
+    customer_name?: string;
+    locale?: string;
+    paid_email_sent?: boolean;
   };
   if (!webhookRes.ok) {
     return Response.json(webhookData, { status: webhookRes.status });
@@ -492,11 +495,13 @@ export async function POST(
   revalidatePath("/", "layout");
 
   if (webhookData.status === "paid") {
+    // The Rust API now returns `customer_email` on settlement (findings G02),
+    // so the direct test-card path can no longer silently skip the receipt.
     await sendPaidConfirmationIfSettled({
       orderCode: order.order_code,
-      recipientEmail: body.customerEmail,
-      locale,
-      idempotent: webhookData.idempotent,
+      recipientEmail: webhookData.customer_email || body.customerEmail,
+      locale: resolveEmailLocale(webhookData.locale, locale),
+      alreadySent: webhookData.paid_email_sent,
     });
   }
 
