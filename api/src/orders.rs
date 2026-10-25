@@ -87,6 +87,12 @@ pub struct ReservationItemInput {
 }
 
 /// One resolved line item on an order (`CART-01`).
+///
+/// The trailing metadata fields are a live `LEFT JOIN products` enrichment,
+/// populated regardless of `products.active`: a SKU deactivated after a
+/// customer checked out must still render its title, photo and stage config
+/// on the checkout / Collector's Pass pages. Older payloads without these
+/// keys deserialize to the DB defaults via `#[serde(default)]`.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, PartialEq, Eq)]
 pub struct OrderItem {
     pub product_id: i64,
@@ -94,6 +100,30 @@ pub struct OrderItem {
     pub quantity: i32,
     pub unit_price_cents: i64,
     pub line_total_cents: i64,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub brand: String,
+    #[serde(default)]
+    pub image_day_url: String,
+    #[serde(default)]
+    pub image_lit_url: String,
+    #[serde(default = "default_order_item_art_variant")]
+    pub art_variant: String,
+    #[serde(default = "default_order_item_art_hue")]
+    pub art_hue: i32,
+    #[serde(default)]
+    pub dimensions: String,
+}
+
+/// Fallback stage config when the enrichment join finds no product row
+/// (matches the `products` column defaults).
+fn default_order_item_art_variant() -> String {
+    "dome".to_string()
+}
+
+fn default_order_item_art_hue() -> i32 {
+    35
 }
 
 /// `POST /api/orders/reserve` body. Supports both single-SKU (`slug` +
@@ -127,6 +157,13 @@ pub struct CreateReservationRequest {
     pub locale: String,
     #[serde(default)]
     pub idempotency_key: Option<String>,
+    /// Cart price-change detection (`CART-01`): the total the customer last
+    /// SAW (cart subtotal). When present and it no longer equals the
+    /// authoritative total computed from the locked product rows, the
+    /// reservation is refused with a 409 instead of silently charging a
+    /// different amount than the cart showed.
+    #[serde(default)]
+    pub expected_total_cents: Option<i64>,
 }
 
 fn default_quantity() -> i32 {
@@ -186,6 +223,7 @@ pub struct PublicOrderStatus {
 struct PublicOrderStatusRow {
     id: i64,
     order_code: String,
+    product_id: i64,
     product_slug: String,
     quantity: i32,
     unit_price_cents: i64,
@@ -794,6 +832,12 @@ fn parse_signed_webhook(
 
 /// Loads the line items for one order (`order_items` table, falling back to
 /// the single-item columns on `orders` if `order_items` is empty).
+///
+/// Every item is enriched with the LIVE product metadata through a
+/// `LEFT JOIN products` that deliberately does NOT filter on `active`: an
+/// admin deactivating a SKU must not blank the title/photo/badge a customer
+/// is looking at on the checkout or Collector's Pass page. Missing rows
+/// (the `product_id = 0` fallback) degrade to the column defaults.
 async fn load_order_items_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     order_id: i64,
@@ -804,8 +848,18 @@ async fn load_order_items_tx(
     fallback_total_cents: i64,
 ) -> Result<Vec<OrderItem>, sqlx::Error> {
     let rows = sqlx::query_as::<_, OrderItem>(
-        "SELECT product_id, product_slug, quantity, unit_price_cents, line_total_cents \
-         FROM order_items WHERE order_id = $1 ORDER BY product_slug ASC, id ASC",
+        "SELECT oi.product_id, oi.product_slug, oi.quantity, oi.unit_price_cents, \
+             oi.line_total_cents, \
+             COALESCE(p.model, '') AS model, \
+             COALESCE(p.brand, '') AS brand, \
+             COALESCE(p.image_day_url, '') AS image_day_url, \
+             COALESCE(p.image_lit_url, '') AS image_lit_url, \
+             COALESCE(p.art_variant, 'dome') AS art_variant, \
+             COALESCE(p.art_hue, 35) AS art_hue, \
+             COALESCE(p.dimensions, '') AS dimensions \
+         FROM order_items oi \
+         LEFT JOIN products p ON p.id = oi.product_id \
+         WHERE oi.order_id = $1 ORDER BY oi.product_slug ASC, oi.id ASC",
     )
     .bind(order_id)
     .fetch_all(&mut **tx)
@@ -815,12 +869,43 @@ async fn load_order_items_tx(
         return Ok(rows);
     }
 
+    // Pre-0007 single-item orders have no `order_items` row: rebuild the item
+    // from the `orders` columns and enrich it from products the same way.
+    let enrichment = sqlx::query_as::<_, (String, String, String, String, String, i32, String)>(
+        "SELECT COALESCE(model, ''), COALESCE(brand, ''), COALESCE(image_day_url, ''), \
+             COALESCE(image_lit_url, ''), COALESCE(art_variant, 'dome'), \
+             COALESCE(art_hue, 35), COALESCE(dimensions, '') \
+         FROM products WHERE id = $1",
+    )
+    .bind(fallback_product_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let (model, brand, image_day_url, image_lit_url, art_variant, art_hue, dimensions) =
+        enrichment.unwrap_or_else(|| {
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                default_order_item_art_variant(),
+                default_order_item_art_hue(),
+                String::new(),
+            )
+        });
+
     Ok(vec![OrderItem {
         product_id: fallback_product_id,
         product_slug: fallback_slug.to_string(),
         quantity: fallback_qty,
         unit_price_cents: fallback_unit_cents,
         line_total_cents: fallback_total_cents,
+        model,
+        brand,
+        image_day_url,
+        image_lit_url,
+        art_variant,
+        art_hue,
+        dimensions,
     }])
 }
 
@@ -940,7 +1025,7 @@ async fn load_public_order_tx(
     order_code: &str,
 ) -> Result<Option<PublicOrderStatus>, sqlx::Error> {
     let row = sqlx::query_as::<_, PublicOrderStatusRow>(
-        "SELECT id, order_code, product_slug, quantity, unit_price_cents, total_cents, currency, \
+        "SELECT id, order_code, product_id, product_slug, quantity, unit_price_cents, total_cents, currency, \
              payment_method, locale, status, fps_reference, expires_at, created_at \
          FROM orders WHERE order_code = $1",
     )
@@ -954,7 +1039,7 @@ async fn load_public_order_tx(
     let items = load_order_items_tx(
         tx,
         row.id,
-        0,
+        row.product_id,
         &row.product_slug,
         row.quantity,
         row.unit_price_cents,
@@ -1182,6 +1267,17 @@ pub async fn create_reservation(
             Ok(Err(ReserveRejection::InsufficientStock)) => {
                 return Err(conflict("insufficient stock available"));
             }
+            Ok(Err(ReserveRejection::PriceChanged {
+                current_total_cents,
+            })) => {
+                warn!(
+                    current_total_cents,
+                    "cart total changed since it was added; refusing the reservation"
+                );
+                return Err(conflict(
+                    "price updated since items were added to cart — please review updated total",
+                ));
+            }
             Err(ReserveFailure::DuplicateOrderCode) => continue,
             Err(ReserveFailure::MoneyOverflow) => {
                 return Err(error_body(
@@ -1206,6 +1302,10 @@ pub async fn create_reservation(
 enum ReserveRejection {
     ProductNotFound,
     InsufficientStock,
+    /// The cart's authoritative total no longer matches `expected_total_cents`
+    /// (an admin price edit landed while the customer was in checkout): the
+    /// handler refuses with a 409 and the current total.
+    PriceChanged { current_total_cents: i64 },
 }
 
 enum ReserveFailure {
@@ -1253,7 +1353,8 @@ async fn reserve_once(
     let mut locked_map = std::collections::HashMap::<String, LockedProduct>::new();
     for slug in &slugs_sorted {
         let product: Option<LockedProduct> = sqlx::query_as(
-            "SELECT id, slug, price_cents, active, stock_total, stock_reserved, stock_quarantined \
+            "SELECT id, slug, price_cents, active, stock_total, stock_reserved, stock_quarantined, \
+                 model, brand, image_day_url, image_lit_url, art_variant, art_hue, dimensions \
              FROM products WHERE slug = $1 FOR UPDATE",
         )
         .bind(slug)
@@ -1312,7 +1413,22 @@ async fn reserve_once(
             quantity: req_item.quantity,
             unit_price_cents: product.price_cents,
             line_total_cents,
+            model: product.model.clone(),
+            brand: product.brand.clone(),
+            image_day_url: product.image_day_url.clone(),
+            image_lit_url: product.image_lit_url.clone(),
+            art_variant: product.art_variant.clone(),
+            art_hue: product.art_hue,
+            dimensions: product.dimensions.clone(),
         });
+    }
+
+    if let Some(expected) = req.expected_total_cents {
+        if expected != total_cents {
+            return Ok(Err(ReserveRejection::PriceChanged {
+                current_total_cents: total_cents,
+            }));
+        }
     }
 
     let primary = &resolved_items[0];
@@ -1431,6 +1547,13 @@ struct LockedProduct {
     stock_total: i32,
     stock_reserved: i32,
     stock_quarantined: i32,
+    model: String,
+    brand: String,
+    image_day_url: String,
+    image_lit_url: String,
+    art_variant: String,
+    art_hue: i32,
+    dimensions: String,
 }
 
 /// `GET /api/orders/{order_code}` — public order status, never cacheable.
@@ -2296,6 +2419,7 @@ mod tests {
             delivery_address: "1 Test Road".to_string(),
             locale: "en".to_string(),
             idempotency_key: None,
+            expected_total_cents: None,
         }
     }
 

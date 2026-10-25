@@ -47,6 +47,7 @@ use axum::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use tracing::warn;
 
@@ -205,6 +206,99 @@ pub struct AdminProductFull {
     pub reference_price: Option<AdminReferencePrice>,
     /// Piece numbers owned by this SKU, ascending.
     pub pieces: Vec<i32>,
+    /// Deterministic content fingerprint of the editable state (see
+    /// [`compute_product_version_hash`]): the flagship editor sends it back as
+    /// `expected_version_hash` so a stale tab can never overwrite a newer
+    /// save (409 instead).
+    pub version_hash: String,
+}
+
+/// The content-bearing state [`compute_product_version_hash`] covers. Stock
+/// counts are deliberately EXCLUDED: the money path moves `stock_reserved`
+/// and `stock_total` on every order, and a stock move must not invalidate an
+/// admin tab's content fingerprint (concurrent-stock protection is the CSV
+/// sync's snapshot job).
+#[derive(Debug, Clone)]
+pub struct ProductVersionState {
+    pub slug: String,
+    pub brand: String,
+    pub model: String,
+    pub price_cents: i64,
+    pub family: String,
+    pub art_variant: String,
+    pub art_hue: i32,
+    pub active: bool,
+    pub image_day_url: String,
+    pub image_lit_url: String,
+    pub designer: String,
+    pub design_year: String,
+    pub dimensions: String,
+    pub light_source: String,
+    pub content: BTreeMap<String, BTreeMap<String, String>>,
+    pub reference_price: Option<AdminReferencePrice>,
+}
+
+/// Deterministic content fingerprint: SHA-256 over a length-prefixed canonical
+/// encoding of every content-bearing field (locale/field order comes from the
+/// `BTreeMap`s, so the same state always hashes the same), returned as a
+/// 16-character lowercase hex prefix. The alias-free length prefixes mean two
+/// different states can never serialise to the same canonical string, and the
+/// short prefix keeps the admin/CSV payloads readable (collision odds remain
+/// negligible for an optimistic-concurrency token).
+///
+/// Reused by `csv_sync.rs` for the `row_version_hash` CSV column.
+pub fn compute_product_version_hash(state: &ProductVersionState) -> String {
+    use std::fmt::Write as _;
+
+    // Length-prefixed field write: `{len}:{value}\u{1f}`. Lengths make the
+    // encoding injective even when values contain separators themselves.
+    fn push_field(buf: &mut String, value: &str) {
+        let _ = write!(buf, "{}:", value.len());
+        buf.push_str(value);
+        buf.push('\u{1f}');
+    }
+
+    let mut canonical = String::new();
+    push_field(&mut canonical, &state.slug);
+    push_field(&mut canonical, &state.brand);
+    push_field(&mut canonical, &state.model);
+    push_field(&mut canonical, &state.price_cents.to_string());
+    push_field(&mut canonical, &state.family);
+    push_field(&mut canonical, &state.art_variant);
+    push_field(&mut canonical, &state.art_hue.to_string());
+    push_field(&mut canonical, if state.active { "1" } else { "0" });
+    push_field(&mut canonical, &state.image_day_url);
+    push_field(&mut canonical, &state.image_lit_url);
+    push_field(&mut canonical, &state.designer);
+    push_field(&mut canonical, &state.design_year);
+    push_field(&mut canonical, &state.dimensions);
+    push_field(&mut canonical, &state.light_source);
+    for (locale, fields) in &state.content {
+        push_field(&mut canonical, locale);
+        for (field, value) in fields {
+            push_field(&mut canonical, field);
+            push_field(&mut canonical, value);
+        }
+    }
+    match &state.reference_price {
+        Some(reference) => {
+            push_field(&mut canonical, "reference_price:some");
+            push_field(&mut canonical, &reference.min_price_cents.to_string());
+            push_field(&mut canonical, &reference.max_price_cents.to_string());
+            push_field(&mut canonical, &reference.source_name);
+            push_field(&mut canonical, &reference.source_url);
+            push_field(&mut canonical, &reference.checked_on.to_string());
+        }
+        None => push_field(&mut canonical, "reference_price:none"),
+    }
+
+    let digest = Sha256::digest(canonical.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex.truncate(16);
+    hex
 }
 
 /// The scalar `products` columns behind [`AdminProductFull`]. The nested
@@ -261,6 +355,18 @@ pub struct UpdateProductFull {
     pub light_source: String,
     pub content: BTreeMap<String, BTreeMap<String, String>>,
     pub reference_price: Option<ReferencePriceInput>,
+    /// Stale-tab guard: when set (non-empty after trimming), the save only
+    /// lands if the row's CURRENT [`AdminProductFull::version_hash`] equals
+    /// it; a mismatch is a 409 (another session saved first).
+    #[serde(default)]
+    pub expected_version_hash: Option<String>,
+    /// Concurrent stock-edit guard: when the operator explicitly supplies
+    /// `stock_total` or `stock_quarantined`, this carries the `stock_total`
+    /// the studio tab saw on load; if a customer order or another session
+    /// changed `stock_total` in the meantime, the stock override is refused
+    /// with a 409 so a stale tab cannot restore sold stock.
+    #[serde(default)]
+    pub expected_stock_total: Option<i32>,
 }
 
 /// `PUT /api/admin/product-content` body and response row.
@@ -284,7 +390,7 @@ pub struct ReferencePriceInput {
 }
 
 /// `reference_prices` row (response).
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow)]
 pub struct AdminReferencePrice {
     pub product_id: i64,
     pub min_price_cents: i64,
@@ -449,7 +555,7 @@ fn validate_price_cents(price_cents: i64) -> Result<(), &'static str> {
     }
 }
 
-fn validate_art_variant(art_variant: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_art_variant(art_variant: &str) -> Result<(), &'static str> {
     match art_variant {
         "dome" | "shades" | "shades-tall" | "piano" | "none" => Ok(()),
         _ => Err(
@@ -458,7 +564,7 @@ fn validate_art_variant(art_variant: &str) -> Result<(), &'static str> {
     }
 }
 
-fn validate_art_hue(art_hue: i32) -> Result<(), &'static str> {
+pub(crate) fn validate_art_hue(art_hue: i32) -> Result<(), &'static str> {
     if (0..=359).contains(&art_hue) {
         Ok(())
     } else {
@@ -466,7 +572,7 @@ fn validate_art_hue(art_hue: i32) -> Result<(), &'static str> {
     }
 }
 
-fn validate_slug_input(slug: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_slug_input(slug: &str) -> Result<(), &'static str> {
     if crate::slug::validate_slug(slug) {
         Ok(())
     } else {
@@ -543,6 +649,11 @@ fn validate_product_patch(patch: &UpdateProduct) -> Result<(), &'static str> {
 /// upsert, and the request is rejected on the first violation. The flagship
 /// editor posts the complete map, so silently SKIPPING a mistyped row would
 /// lose copy without a word: a bad entry is a 400, never a drop.
+///
+/// An EMPTY (or whitespace-only) value is deliberately legal here: the full
+/// save is the form's whole state, and clearing a text box means DELETE the
+/// stored copy row (the handler does that), so emptying `zhColourway` must
+/// not resurrect the old text.
 fn validate_content_map(
     content: &BTreeMap<String, BTreeMap<String, String>>,
     locales: &[String],
@@ -557,9 +668,6 @@ fn validate_content_map(
                 _ => {
                     return Err("field must be one of model_alt, colourway, heritage, electrical");
                 }
-            }
-            if value.trim().is_empty() {
-                return Err("value cannot be empty");
             }
             reject_nul(value)?;
         }
@@ -834,7 +942,7 @@ fn webhook_body(secret: &str, tag: &str) -> String {
 /// The 60s ISR revalidate window is the documented 5b fallback — on failure
 /// (or timeout) warn! once and do NOT retry. Webhook off (knobs unset or
 /// misconfigured): return silently; boot already warned once.
-fn fire_revalidation(tag: &'static str) {
+pub(crate) fn fire_revalidation(tag: &'static str) {
     tokio::spawn(async move {
         // Read at call time via the config fns (env-knob pattern): the URL is
         // needed here, not at boot.
@@ -989,6 +1097,28 @@ async fn load_product_full(
     .fetch_all(&mut **tx)
     .await?;
 
+    // Fingerprint the exact content state the response carries: stock counts
+    // are excluded on purpose (the money path moves them without changing
+    // what the editor form edits).
+    let version_hash = compute_product_version_hash(&ProductVersionState {
+        slug: product.slug.clone(),
+        brand: product.brand.clone(),
+        model: product.model.clone(),
+        price_cents: product.price_cents,
+        family: product.family.clone(),
+        art_variant: product.art_variant.clone(),
+        art_hue: product.art_hue,
+        active: product.active,
+        image_day_url: product.image_day_url.clone(),
+        image_lit_url: product.image_lit_url.clone(),
+        designer: product.designer.clone(),
+        design_year: product.design_year.clone(),
+        dimensions: product.dimensions.clone(),
+        light_source: product.light_source.clone(),
+        content: content.clone(),
+        reference_price: reference_price.clone(),
+    });
+
     Ok(Some(AdminProductFull {
         id: product.id,
         slug: product.slug,
@@ -1012,6 +1142,7 @@ async fn load_product_full(
         content,
         reference_price,
         pieces,
+        version_hash,
     }))
 }
 
@@ -1112,6 +1243,36 @@ pub async fn create_product(
     Ok(Json(row))
 }
 
+/// Cascade a product slug rename onto every historical/active order line,
+/// inside the caller's transaction (the caller already locked the product
+/// row). An admin rename must never orphan the slug an order page displays:
+/// both `orders.product_slug` and `order_items.product_slug` are the order
+/// contract's own snapshot and are rewritten in the same atomic write.
+///
+/// Shared by the partial update, the full save and `csv_sync.rs`.
+pub(crate) async fn cascade_product_slug(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    product_id: i64,
+    new_slug: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE orders SET product_slug = $1 WHERE product_id = $2 AND product_slug <> $1",
+    )
+    .bind(new_slug)
+    .bind(product_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE order_items SET product_slug = $1 \
+         WHERE product_id = $2 AND product_slug <> $1",
+    )
+    .bind(new_slug)
+    .bind(product_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// `PUT /api/admin/products/{id}` — partial update; `None` fields unchanged.
 /// Audit detail carries exactly the fields that changed.
 pub async fn update_product(
@@ -1133,6 +1294,15 @@ pub async fn update_product(
         .begin()
         .await
         .map_err(|e| state::database_unavailable("failed to open product transaction", &e))?;
+    // The rename cascade needs the slug BEFORE the update: the row is locked
+    // here, so the read/update pair cannot interleave with another save.
+    let current_slug: String =
+        sqlx::query_scalar("SELECT slug FROM products WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| state::database_unavailable("failed to load product", &e))?
+            .ok_or_else(|| not_found("product not found"))?;
     let row = sqlx::query_as::<_, AdminProduct>(
         "UPDATE products SET \
              slug = COALESCE($1, slug), \
@@ -1166,6 +1336,16 @@ pub async fn update_product(
         )
     })?
     .ok_or_else(|| not_found("product not found"))?;
+
+    // Slug rename: rewrite the order links in the same transaction so no
+    // active/historical order keeps pointing at the old slug.
+    if let Some(new_slug) = patch.slug.as_deref() {
+        if new_slug != current_slug {
+            cascade_product_slug(&mut tx, id, new_slug)
+                .await
+                .map_err(|e| state::database_unavailable("failed to cascade slug rename", &e))?;
+        }
+    }
 
     let mut detail = serde_json::Map::new();
     if let Some(v) = &patch.slug {
@@ -1281,17 +1461,47 @@ pub async fn update_product_full(
         .begin()
         .await
         .map_err(|e| state::database_unavailable("failed to open product transaction", &e))?;
-    let current_stock = sqlx::query_as::<_, (i32, i32, i32)>(
-        "SELECT stock_total, stock_reserved, stock_quarantined \
+    let current_stock = sqlx::query_as::<_, (String, i32, i32, i32)>(
+        "SELECT slug, stock_total, stock_reserved, stock_quarantined \
          FROM products WHERE id = $1 FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| state::database_unavailable("failed to load product stock", &e))?;
-    let Some((current_total, current_reserved, current_quarantined)) = current_stock else {
+    let Some((current_slug, current_total, current_reserved, current_quarantined)) = current_stock
+    else {
         return Err(not_found("product not found"));
     };
+    // Stale-tab guard: the row is locked, so this comparison is against the
+    // exact state the save will overwrite. A non-empty expected hash that no
+    // longer matches means another session saved first — 409, never a silent
+    // clobber of the newer edit.
+    if let Some(expected) = input
+        .expected_version_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+    {
+        let current = load_product_full(&mut tx, id)
+            .await
+            .map_err(|e| state::database_unavailable("failed to load current product", &e))?
+            .ok_or_else(|| not_found("product not found"))?;
+        if current.version_hash != expected {
+            return Err(conflict(
+                "product was modified by another session; reload before saving",
+            ));
+        }
+    }
+    if input.stock_total.is_some() || input.stock_quarantined.is_some() {
+        if let Some(expected_stock) = input.expected_stock_total {
+            if expected_stock != current_total {
+                return Err(conflict(
+                    "stock changed while this tab was open; reload before overriding stock",
+                ));
+            }
+        }
+    }
     let (stock_total, stock_quarantined) = validate_full_stock(
         input.stock_total,
         input.stock_quarantined,
@@ -1337,9 +1547,50 @@ pub async fn update_product_full(
         )
     })?;
 
-    // Content rows: upsert every (locale, field) entry (already validated).
+    // Slug rename: rewrite the order links in the same transaction so no
+    // active/historical order keeps pointing at the old slug.
+    if input.slug != current_slug {
+        cascade_product_slug(&mut tx, id, &input.slug)
+            .await
+            .map_err(|e| state::database_unavailable("failed to cascade slug rename", &e))?;
+    }
+
+    // Content rows are the form's WHOLE state: every stored (locale, field)
+    // the request omits or sends blank is DELETED, then every non-blank entry
+    // is upserted. Clearing a text box in Admin Studio must remove the old
+    // copy row, never leave it resurrected for the storefront to serve.
+    let stored_content: Vec<(String, String)> = sqlx::query_as(
+        "SELECT locale, field FROM product_content WHERE product_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| state::database_unavailable("failed to load product content", &e))?;
+    let is_cleared = |locale: &str, field: &str| -> bool {
+        input
+            .content
+            .get(locale)
+            .and_then(|fields| fields.get(field))
+            .is_none_or(|value| value.trim().is_empty())
+    };
+    for (locale, field) in &stored_content {
+        if is_cleared(locale, field) {
+            sqlx::query(
+                "DELETE FROM product_content WHERE product_id = $1 AND locale = $2 AND field = $3",
+            )
+            .bind(id)
+            .bind(locale)
+            .bind(field)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| state::database_unavailable("failed to delete product content", &e))?;
+        }
+    }
     for (locale, fields) in &input.content {
         for (field, value) in fields {
+            if value.trim().is_empty() {
+                continue; // already handled by the delete pass above
+            }
             sqlx::query(
                 "INSERT INTO product_content (product_id, locale, field, value) \
                  VALUES ($1, $2, $3, $4) \
@@ -2613,6 +2864,8 @@ mod tests {
                 source_url: "https://shop.example.com/x".to_string(),
                 checked_on: "2026-02-28".to_string(),
             }),
+            expected_version_hash: None,
+            expected_stock_total: None,
         }
     }
 
@@ -2750,16 +3003,15 @@ mod tests {
             Err("field must be one of model_alt, colourway, heritage, electrical")
         );
 
-        // A blank value is rejected, never upserted as empty copy.
-        let mut bad = full_input();
-        bad.content = BTreeMap::from([(
+        // A blank value is LEGAL in the full save: it is the form clearing
+        // that copy slot (the handler deletes the stored row). NUL bytes stay
+        // rejected below.
+        let mut blank = full_input();
+        blank.content = BTreeMap::from([(
             "en".to_string(),
             BTreeMap::from([("electrical".to_string(), "  ".to_string())]),
         )]);
-        assert_eq!(
-            validate_product_full(&bad, &locales()),
-            Err("value cannot be empty")
-        );
+        assert_eq!(validate_product_full(&blank, &locales()), Ok(()));
 
         let mut bad = full_input();
         bad.content = BTreeMap::from([(
@@ -2815,6 +3067,7 @@ mod tests {
             content: BTreeMap::new(),
             reference_price: None,
             pieces: vec![16],
+            version_hash: "0123456789abcdef".to_string(),
         };
         let value = serde_json::to_value(&product).unwrap();
         let keys: std::collections::BTreeSet<&str> = value
@@ -2846,6 +3099,7 @@ mod tests {
             "content",
             "reference_price",
             "pieces",
+            "version_hash",
         ]
         .into_iter()
         .collect();
@@ -2855,6 +3109,116 @@ mod tests {
         // pending), never invented.
         assert_eq!(value["stock_quarantined"], 0);
         assert!(value["reference_price"].is_null());
+    }
+
+    // -- version hash (stale-tab concurrency guard) ------------------------
+
+    /// A fixed, fully-populated state the hash tests mutate one field at a
+    /// time. Deliberately includes content rows, a reference price and text
+    /// that could collide with a naive delimiter join.
+    fn version_state() -> ProductVersionState {
+        ProductVersionState {
+            slug: "ph-5".to_string(),
+            brand: "Louis Poulsen".to_string(),
+            model: "PH 5".to_string(),
+            price_cents: 745_000,
+            family: "ph-5".to_string(),
+            art_variant: "dome".to_string(),
+            art_hue: 35,
+            active: true,
+            image_day_url: "https://cdn.example.com/day.webp".to_string(),
+            image_lit_url: "https://cdn.example.com/lit.webp".to_string(),
+            designer: "Poul Henningsen".to_string(),
+            design_year: "1958".to_string(),
+            dimensions: "Ø 500 mm".to_string(),
+            light_source: "E27 · 2700K".to_string(),
+            content: BTreeMap::from([(
+                "en".to_string(),
+                BTreeMap::from([("colourway".to_string(), "White".to_string())]),
+            )]),
+            reference_price: Some(AdminReferencePrice {
+                product_id: 1,
+                min_price_cents: 100,
+                max_price_cents: 200,
+                source_name: "Some Shop".to_string(),
+                source_url: "https://shop.example.com/x".to_string(),
+                checked_on: NaiveDate::from_ymd_opt(2026, 2, 28).unwrap(),
+            }),
+        }
+    }
+
+    #[test]
+    fn version_hash_is_deterministic_and_content_sensitive() {
+        let state = version_state();
+        let hash = compute_product_version_hash(&state);
+        assert_eq!(hash.len(), 16, "the contract pins a 16-char prefix");
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex only: {hash}"
+        );
+        assert_eq!(
+            compute_product_version_hash(&version_state()),
+            hash,
+            "the same state must always hash the same"
+        );
+
+        // Every hashed dimension must move the fingerprint. Stock is NOT one
+        // of them (it is not part of ProductVersionState) — that is exactly
+        // why a customer order cannot invalidate an open admin tab.
+        type Mutation = fn(&mut ProductVersionState);
+        let mutations: &[Mutation] = &[
+            |s| s.slug = "ph-5x".to_string(),
+            |s| s.brand = "Other".to_string(),
+            |s| s.model = "PH 6".to_string(),
+            |s| s.price_cents += 1,
+            |s| s.family = "other".to_string(),
+            |s| s.art_variant = "shades".to_string(),
+            |s| s.art_hue = 36,
+            |s| s.active = false,
+            |s| s.image_day_url = "day2".to_string(),
+            |s| s.image_lit_url = "lit2".to_string(),
+            |s| s.designer = "Other".to_string(),
+            |s| s.design_year = "1959".to_string(),
+            |s| s.dimensions = "other".to_string(),
+            |s| s.light_source = "other".to_string(),
+            |s| {
+                s.content
+                    .get_mut("en")
+                    .unwrap()
+                    .insert("colourway".to_string(), "Black".to_string());
+            },
+            |s| {
+                s.content
+                    .entry("zh-HK".to_string())
+                    .or_default()
+                    .insert("heritage".to_string(), "傳承".to_string());
+            },
+            |s| s.reference_price = None,
+            |s| s.reference_price.as_mut().unwrap().min_price_cents = 101,
+        ];
+        for mutate in mutations {
+            let mut changed = version_state();
+            mutate(&mut changed);
+            assert_ne!(
+                compute_product_version_hash(&changed),
+                hash,
+                "a changed field must move the fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn version_hash_has_a_pinned_known_answer() {
+        // Computed once from the fixed `version_state()` and frozen here:
+        // the encoding (order, length prefixes, selection of fields) is a
+        // client-visible contract (`row_version_hash` in the CSV and
+        // `expected_version_hash` on save), so a refactor that silently
+        // changes it must fail this test, not invalidate every open tab.
+        assert_eq!(
+            compute_product_version_hash(&version_state()),
+            "01c3c978a3455d37"
+        );
     }
 
     #[test]

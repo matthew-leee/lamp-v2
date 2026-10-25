@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { loadStorefrontData, readSiteCopy } from "@/lib/api";
 import { formatProductTitle } from "@/lib/format";
-import { isLocale, type Locale } from "@/lib/i18n";
+import { isLocale, t, ui, type Locale } from "@/lib/i18n";
 import ProductStoryClient from "@/components/product-story-client";
 
 export const dynamic = "force-dynamic";
@@ -16,14 +16,18 @@ export async function generateMetadata({
   const { lang, slug } = await params;
   const locale: Locale = isLocale(lang) ? lang : "en";
   const { catalogue, siteContent, config } = await loadStorefrontData();
+  const displayBrand =
+    config.brandName.trim() !== ""
+      ? config.brandName
+      : t(ui.defaultExhibitionTitle, locale);
   const product = catalogue.products.find((p) => p.slug === slug);
   if (!product) {
     // LANG-01: the not-found title speaks the route's language too.
     return {
       title:
         locale === "zh-HK"
-          ? `找不到作品 | ${config.brandName}`
-          : `Not Found | ${config.brandName}`,
+          ? `找不到作品 | ${displayBrand}`
+          : `Not Found | ${displayBrand}`,
     };
   }
 
@@ -37,7 +41,7 @@ export async function generateMetadata({
     locale,
   );
   const vars = {
-    brand: config.brandName,
+    brand: displayBrand,
     pieces: catalogue.total_pieces,
     subject: displayTitle,
   };
@@ -46,14 +50,14 @@ export async function generateMetadata({
     "meta.product.descriptionTemplate",
     locale,
     vars,
-    `${displayTitle} · ${config.brandName}`,
+    `${displayTitle} · ${displayBrand}`,
   );
 
   return {
-    title: `${displayTitle} | ${config.brandName}`,
+    title: `${displayTitle} | ${displayBrand}`,
     description,
     openGraph: {
-      title: `${displayTitle} | ${config.brandName}`,
+      title: `${displayTitle} | ${displayBrand}`,
       description,
       images: product.image_lit_url
         ? [product.image_lit_url]
@@ -104,8 +108,13 @@ export default async function ProductStoryPage({
     locale,
   );
 
+  const displayBrand =
+    config.brandName.trim() !== ""
+      ? config.brandName
+      : t(ui.defaultExhibitionTitle, locale);
+
   const vars = {
-    brand: config.brandName,
+    brand: displayBrand,
     pieces: catalogue.total_pieces,
     subject: displayTitle,
   };
@@ -113,12 +122,6 @@ export default async function ProductStoryPage({
   const copy = {
     disclosure: readSiteCopy(siteContent, "trust.disclosure", locale, vars),
     warrantyPending: readSiteCopy(siteContent, "warranty.pending", locale, vars),
-    referencePending: readSiteCopy(
-      siteContent,
-      "reference.pending",
-      locale,
-      vars,
-    ),
     enquiryMessage: readSiteCopy(
       siteContent,
       "enquiry.messageTemplate",
@@ -126,8 +129,8 @@ export default async function ProductStoryPage({
       vars,
       // LANG-01: the fallback enquiry line speaks the route's language.
       locale === "zh-HK"
-        ? `你好 ${config.brandName}，我想查詢 ${displayTitle}。`
-        : `Hello ${config.brandName}, I would like to enquire about ${displayTitle}.`,
+        ? `你好 ${displayBrand}，我想查詢 ${displayTitle}。`
+        : `Hello ${displayBrand}, I would like to enquire about ${displayTitle}.`,
     ),
   };
 

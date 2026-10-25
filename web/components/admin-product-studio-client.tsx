@@ -47,6 +47,13 @@ export interface AdminProductFullData {
     checked_on: string;
   } | null;
   pieces: number[];
+  /**
+   * ADMIN-01 stale-tab guard: hash of the content-bearing columns this row was
+   * loaded with. It travels back as `expected_version_hash`, so a save from a
+   * tab that loaded an OLDER version is rejected with 409 instead of silently
+   * overwriting a newer save from another session.
+   */
+  version_hash?: string;
 }
 
 export interface AdminProductSummary {
@@ -58,6 +65,12 @@ export interface AdminProductSummary {
 
 /** Everything the studio form can edit — one sessionStorage draft snapshot. */
 interface StudioDraft {
+  /**
+   * The `version_hash` these edits were made against. Persisted WITH the draft
+   * so a draft restored into a reloaded tab still knows its base version — a
+   * stale draft then loses the save (409) instead of clobbering newer data.
+   */
+  baseVersionHash: string;
   slug: string;
   brand: string;
   model: string;
@@ -119,6 +132,15 @@ export default function AdminProductStudioClient({
   const [uploadingField, setUploadingField] = useState<"day" | "lit" | null>(null);
   const [banner, setBanner] = useState<string | null>(initialBanner);
   const [errorMsg, setErrorMsg] = useState<string | null>(initialError);
+
+  // ADMIN-01: the URL slug is locked by default. A rename cascades onto every
+  // historical order line, so it must be a deliberate, explicitly unlocked act.
+  const [slugUnlocked, setSlugUnlocked] = useState(false);
+
+  // The version this form's edits are based on (see `version_hash`).
+  const [baseVersionHash, setBaseVersionHash] = useState<string>(
+    initialProduct.version_hash ?? "",
+  );
 
   // Editable form state (human dollars for prices!)
   const [slug, setSlug] = useState(row.slug);
@@ -208,6 +230,7 @@ export default function AdminProductStudioClient({
 
   function collectDraft(): StudioDraft {
     return {
+      baseVersionHash,
       slug,
       brand,
       model,
@@ -260,6 +283,11 @@ export default function AdminProductStudioClient({
       draft = JSON.parse(raw) as Partial<StudioDraft>;
     } catch {
       return; // corrupted or unavailable draft — ignore
+    }
+    // A restored draft keeps ITS OWN base version: if the row moved on since,
+    // saving it must 409 rather than silently overwrite the newer save.
+    if (typeof draft.baseVersionHash === "string") {
+      setBaseVersionHash(draft.baseVersionHash);
     }
     const applyStr = (v: unknown, set: (s: string) => void) => {
       if (typeof v === "string") set(v);
@@ -363,20 +391,24 @@ export default function AdminProductStudioClient({
       return;
     }
 
-    const contentPayload: Record<string, Record<string, string>> = {};
-    const enFields: Record<string, string> = {};
-    if (enModelAlt.trim()) enFields.model_alt = enModelAlt.trim();
-    if (enColourway.trim()) enFields.colourway = enColourway.trim();
-    if (enHeritage.trim()) enFields.heritage = enHeritage.trim();
-    if (enElectrical.trim()) enFields.electrical = enElectrical.trim();
-    if (Object.keys(enFields).length > 0) contentPayload.en = enFields;
-
-    const zhFields: Record<string, string> = {};
-    if (zhModelAlt.trim()) zhFields.model_alt = zhModelAlt.trim();
-    if (zhColourway.trim()) zhFields.colourway = zhColourway.trim();
-    if (zhHeritage.trim()) zhFields.heritage = zhHeritage.trim();
-    if (zhElectrical.trim()) zhFields.electrical = zhElectrical.trim();
-    if (Object.keys(zhFields).length > 0) contentPayload["zh-HK"] = zhFields;
+    // ADMIN-01: the form's copy state IS the request — all four fields are sent
+    // for BOTH locales, including empty strings. Omitting a cleared box would
+    // leave the previous `product_content` row in place and the old text would
+    // reappear on the storefront; the API deletes every cleared (locale, field).
+    const contentPayload: Record<string, Record<string, string>> = {
+      en: {
+        model_alt: enModelAlt.trim(),
+        colourway: enColourway.trim(),
+        heritage: enHeritage.trim(),
+        electrical: enElectrical.trim(),
+      },
+      "zh-HK": {
+        model_alt: zhModelAlt.trim(),
+        colourway: zhColourway.trim(),
+        heritage: zhHeritage.trim(),
+        electrical: zhElectrical.trim(),
+      },
+    };
 
     let referencePayload: {
       min_price_cents: number;
@@ -429,11 +461,19 @@ export default function AdminProductStudioClient({
       reference_price: referencePayload,
     };
 
+    // ADMIN-01: only sent when we actually loaded a hash (a row served by an
+    // API version that predates the column keeps working unguarded).
+    if (baseVersionHash !== "") {
+      payload.expected_version_hash = baseVersionHash;
+    }
+
     if (stockTotalInput.trim() !== "") {
       payload.stock_total = Number.parseInt(stockTotalInput.trim(), 10);
+      payload.expected_stock_total = row.stock_total;
     }
     if (stockQuarantinedInput.trim() !== "") {
       payload.stock_quarantined = Number.parseInt(stockQuarantinedInput.trim(), 10);
+      payload.expected_stock_total = row.stock_total;
     }
 
     // G23: snapshot the draft immediately before the save call so a bounced
@@ -455,10 +495,17 @@ export default function AdminProductStudioClient({
         error?: string;
       };
       if (!res.ok) {
-        setErrorMsg(data.error ?? `Save rejected (HTTP ${res.status})`);
+        setErrorMsg(
+          res.status === 409
+            ? (data.error ??
+              "This product changed in another session or tab. Your edits are kept as a draft — reload the studio to see the newer values, then re-apply them.")
+            : (data.error ?? `Save rejected (HTTP ${res.status})`),
+        );
         return;
       }
       setRow(data);
+      // The saved row's hash becomes the base for the next save.
+      setBaseVersionHash(data.version_hash ?? "");
       if (editVersionRef.current === editVersionAtSaveStart) {
         // Nothing was edited while the save was in flight: the whole draft is
         // persisted now and can go. (Newer edits keep the dirty flag AND the
@@ -528,8 +575,10 @@ export default function AdminProductStudioClient({
     router.refresh();
   }
 
+  // iOS Safari zooms into any focused field whose font-size is below 16px, so
+  // every operator input is 16px on phones and only drops to 14px from `sm:` up.
   const inputClass =
-    "w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--color-glow)] focus:outline-none";
+    "w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2 text-base text-[var(--text-primary)] sm:text-sm focus:border-[var(--color-glow)]";
 
   return (
     <div className="space-y-8">
@@ -636,14 +685,28 @@ export default function AdminProductStudioClient({
             </p>
           </div>
           <div>
-            <LampStage
-              hue={artHue}
-              variant={artVariant}
-              lit={true}
-              dimensionsText={dimensions}
-              mode="scale"
-              aspectClass="aspect-square"
-            />
+            {artVariant === "none" ? (
+              // MEDIA-01(c): a plain-photo SKU has no CAD silhouette. Say so
+              // explicitly instead of rendering an empty stage the operator
+              // would read as a rendering bug.
+              <div className="flex aspect-square w-full flex-col items-center justify-center gap-2 border border-dashed border-[var(--border-hairline)] bg-[var(--surface-page)] p-4 text-center">
+                <span className="text-[10px] tracking-[0.18em] uppercase text-[var(--text-secondary)]">
+                  Panel 3 · CAD
+                </span>
+                <p className="text-xs leading-relaxed text-[var(--text-primary)]">
+                  1:10 CAD Schematic Disabled (art_variant = none)
+                </p>
+              </div>
+            ) : (
+              <LampStage
+                hue={artHue}
+                variant={artVariant}
+                lit={true}
+                dimensionsText={dimensions}
+                mode="scale"
+                aspectClass="aspect-square"
+              />
+            )}
             <p className="mt-2 text-center text-xs tracking-[0.14em] uppercase text-[var(--text-secondary)]">
               1:10 CAD Scale Blueprint
             </p>
@@ -665,17 +728,39 @@ export default function AdminProductStudioClient({
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div>
-              <label htmlFor="st-slug" className="text-xs text-[var(--text-secondary)]">
-                Slug (URL Path) *
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="st-slug" className="text-xs text-[var(--text-secondary)]">
+                  Slug (URL Path) *
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setSlugUnlocked((prev) => !prev)}
+                  aria-pressed={slugUnlocked}
+                  className="border border-[var(--border-hairline)] px-2 py-0.5 text-[10px] tracking-[0.14em] uppercase text-[var(--text-secondary)] hover:border-[var(--color-glow)] hover:text-[var(--text-primary)]"
+                >
+                  {slugUnlocked ? "⛓ Lock URL Slug" : "⛓ Unlock URL Slug"}
+                </button>
+              </div>
               <input
                 id="st-slug"
                 type="text"
                 required
+                readOnly={!slugUnlocked}
+                aria-describedby="st-slug-hint"
                 value={slug}
                 onChange={(e) => setSlug(e.target.value)}
-                className={inputClass}
+                className={`${inputClass} ${
+                  slugUnlocked ? "" : "cursor-not-allowed text-[var(--text-secondary)]"
+                }`}
               />
+              <p
+                id="st-slug-hint"
+                className="mt-1 text-[11px] text-[var(--text-secondary)]"
+              >
+                {slugUnlocked
+                  ? "Unlocked: renaming cascades onto every existing order line and the old storefront URL stops resolving."
+                  : "Locked to protect live links and past orders — unlock only to rename deliberately."}
+              </p>
             </div>
             <div>
               <label htmlFor="st-brand" className="text-xs text-[var(--text-secondary)]">
@@ -952,7 +1037,7 @@ export default function AdminProductStudioClient({
                   max={359}
                   value={artHue}
                   onChange={(e) => setArtHue(Number(e.target.value))}
-                  className="w-20 border border-[var(--border-hairline)] bg-[var(--surface-page)] px-2.5 py-1.5 font-mono text-sm"
+                  className="w-20 border border-[var(--border-hairline)] bg-[var(--surface-page)] px-2.5 py-1.5 font-mono text-base sm:text-sm"
                 />
               </div>
             </div>
@@ -1209,7 +1294,7 @@ export default function AdminProductStudioClient({
           <button
             type="submit"
             disabled={saving}
-            className="bg-[var(--color-glow)] px-8 py-3 text-xs font-semibold tracking-[0.2em] uppercase text-[#11100e] hover:opacity-90 disabled:opacity-50"
+            className="bg-[var(--color-glow)] px-8 py-3 text-xs font-semibold tracking-[0.2em] uppercase text-[var(--text-on-glow)] hover:opacity-90 disabled:opacity-50"
           >
             {saving ? "Saving Changes..." : "Save All Changes"}
           </button>
@@ -1223,76 +1308,80 @@ export default function AdminProductStudioClient({
         </h2>
 
         {row.pieces.length > 0 ? (
-          <table className="w-full border-collapse text-left text-sm">
-            <thead>
-              <tr className="border-b border-[var(--border-hairline)] text-xs text-[var(--text-secondary)]">
-                <th className="py-2">Piece #</th>
-                <th className="py-2">Reassign to Another SKU</th>
-                <th className="py-2 text-right">Remove</th>
-              </tr>
-            </thead>
-            <tbody>
-              {row.pieces.map((pieceNo) => (
-                <tr
-                  key={pieceNo}
-                  className="border-b border-[var(--border-hairline)]"
-                >
-                  <td className="py-3 font-mono font-semibold">
-                    #{String(pieceNo).padStart(2, "0")}
-                  </td>
-                  <td className="py-3">
-                    <form
-                      method="post"
-                      action={`/admin/api/pieces/${pieceNo}`}
-                      className="flex flex-wrap items-center gap-2"
-                    >
-                      <input
-                        type="hidden"
-                        name="return_product_id"
-                        value={row.id}
-                      />
-                      <select
-                        name="product_id"
-                        defaultValue={row.id}
-                        className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-1.5 text-xs"
-                      >
-                        {allProducts.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            #{p.id} · {p.brand} {p.model} ({p.slug})
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="submit"
-                        name="action"
-                        value="reassign"
-                        className="border border-[var(--border-hairline)] px-3 py-1.5 text-xs uppercase hover:border-[var(--color-glow)]"
-                      >
-                        Reassign
-                      </button>
-                    </form>
-                  </td>
-                  <td className="py-3 text-right">
-                    <form method="post" action={`/admin/api/pieces/${pieceNo}`}>
-                      <input
-                        type="hidden"
-                        name="return_product_id"
-                        value={row.id}
-                      />
-                      <button
-                        type="submit"
-                        name="action"
-                        value="delete"
-                        className="border border-[var(--border-hairline)] px-3 py-1.5 text-xs text-[var(--color-error)] uppercase hover:border-[var(--color-error)]"
-                      >
-                        Delete
-                      </button>
-                    </form>
-                  </td>
+          /* The reassignment table has 4 cramped controls per row — it must
+             scroll inside its own box instead of widening the page on mobile. */
+          <div className="scroll-contain overflow-x-auto">
+            <table className="w-full border-collapse text-left text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border-hairline)] text-xs text-[var(--text-secondary)]">
+                  <th className="py-2">Piece #</th>
+                  <th className="py-2">Reassign to Another SKU</th>
+                  <th className="py-2 text-right">Remove</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {row.pieces.map((pieceNo) => (
+                  <tr
+                    key={pieceNo}
+                    className="border-b border-[var(--border-hairline)]"
+                  >
+                    <td className="py-3 font-mono font-semibold">
+                      #{String(pieceNo).padStart(2, "0")}
+                    </td>
+                    <td className="py-3">
+                      <form
+                        method="post"
+                        action={`/admin/api/pieces/${pieceNo}`}
+                        className="flex flex-wrap items-center gap-2"
+                      >
+                        <input
+                          type="hidden"
+                          name="return_product_id"
+                          value={row.id}
+                        />
+                        <select
+                          name="product_id"
+                          defaultValue={row.id}
+                          className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-1.5 text-base sm:text-sm"
+                        >
+                          {allProducts.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              #{p.id} · {p.brand} {p.model} ({p.slug})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="submit"
+                          name="action"
+                          value="reassign"
+                          className="border border-[var(--border-hairline)] px-3 py-1.5 text-xs uppercase hover:border-[var(--color-glow)]"
+                        >
+                          Reassign
+                        </button>
+                      </form>
+                    </td>
+                    <td className="py-3 text-right">
+                      <form method="post" action={`/admin/api/pieces/${pieceNo}`}>
+                        <input
+                          type="hidden"
+                          name="return_product_id"
+                          value={row.id}
+                        />
+                        <button
+                          type="submit"
+                          name="action"
+                          value="delete"
+                          className="border border-[var(--border-hairline)] px-3 py-1.5 text-xs text-[var(--color-error)] uppercase hover:border-[var(--color-error)]"
+                        >
+                          Delete
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <p className="text-xs text-[var(--text-secondary)]">
             No numbered drop pieces assigned yet — this SKU currently renders on
@@ -1321,7 +1410,7 @@ export default function AdminProductStudioClient({
               step={1}
               required
               placeholder="e.g. 17"
-              className="mt-1 w-36 border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 font-mono text-sm"
+              className="mt-1 w-36 border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 font-mono text-base sm:text-sm"
             />
           </div>
           <button

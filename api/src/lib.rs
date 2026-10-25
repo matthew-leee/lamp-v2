@@ -12,6 +12,7 @@ pub mod admin_crud;
 pub mod catalogue;
 pub mod config;
 pub mod content;
+pub mod csv_sync;
 pub mod money;
 pub mod orders;
 pub mod slug;

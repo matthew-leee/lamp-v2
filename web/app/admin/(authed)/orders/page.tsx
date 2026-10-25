@@ -116,7 +116,7 @@ export default async function AdminOrdersPage({
         </div>
       )}
 
-      <div className="overflow-x-auto border border-[var(--border-hairline)] bg-[var(--surface-card)]">
+      <div className="scroll-contain overflow-x-auto border border-[var(--border-hairline)] bg-[var(--surface-card)]">
         <table className="w-full border-collapse text-left text-sm">
           <thead>
             <tr className="border-b border-[var(--border-hairline)] text-xs uppercase tracking-[0.14em] text-[var(--text-secondary)]">
@@ -265,13 +265,13 @@ export default async function AdminOrdersPage({
                               required
                               defaultValue={row.fps_reference}
                               placeholder="FPS Ref #"
-                              className="w-32 border border-[var(--border-hairline)] bg-[var(--surface-page)] px-2 py-1 font-mono text-xs"
+                              className="w-32 border border-[var(--border-hairline)] bg-[var(--surface-page)] px-2 py-1 font-mono text-base sm:text-xs"
                             />
                             <button
                               type="submit"
                               name="action"
                               value="confirm_fps"
-                              className="bg-[var(--color-glow)] px-2.5 py-1 text-xs font-semibold uppercase text-[#11100e]"
+                              className="bg-[var(--color-glow)] px-2.5 py-1 text-xs font-semibold uppercase text-[var(--text-on-glow)]"
                             >
                               {row.status === "expired"
                                 ? "Record Late FPS"

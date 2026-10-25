@@ -1,11 +1,14 @@
 @import "tailwindcss";
 
 /*
-  Awwwards / Webby Architectural Design System:
+  Awwwards / Webby Architectural Design System (CSS-01):
   - Inspired by Oakâme (#F6F1EB / #1E1B18), Palmer Tableware (spatial canvas &
     tactile stage), and Urban Jürgensen (archival numbered edition grid).
   - Dual room atmosphere: Daylight 5500K (:root) and Nocturne 2700K
     (html[data-atmosphere="night"]).
+  - Intrinsic CSS architecture: zero hardcoded magic dimensions, 3-zone header
+    grid, [grid-area:1/1] dual-label stacking, 100dvh first-fold flex/grid stage
+    allocation, and CSS subgrid card alignment.
 */
 
 @theme {
@@ -22,6 +25,7 @@
 }
 
 :root {
+  --header-height: 3.5rem;
   --surface-page: #f6f1eb;
   --surface-card: #fbf9f5;
   --surface-elevated: #f1eae0;
@@ -29,8 +33,20 @@
   --surface-glass: rgba(246, 241, 235, 0.86);
   --text-primary: #1e1b18;
   --text-secondary: #5a534a;
+  --text-on-glow: #11100e;
   --border-hairline: #ddd3c2;
   --border-strong: #1e1b18;
+
+  /*
+    Utopia-style fluid scale: every value is a clamp() of a viewport-relative
+    term between a fixed rem floor and ceiling, so type and gutters breathe on
+    large viewports while staying legible at 320px and under user zoom.
+  */
+  --space-page-x: clamp(1rem, 3.5vw, 2.5rem);
+  --space-section-y: clamp(2.5rem, 5vw, 4.5rem);
+  --text-hero: clamp(1.65rem, 2.2vw + 0.9rem, 2.65rem);
+  --text-h1: clamp(1.75rem, 2.4vw + 0.9rem, 2.5rem);
+  --text-h2: clamp(1.45rem, 1.6vw + 0.85rem, 2rem);
 }
 
 html[data-atmosphere="night"] {
@@ -49,6 +65,7 @@ html[data-atmosphere="night"] {
   --surface-glass: rgba(17, 16, 14, 0.86);
   --text-primary: #f4efe6;
   --text-secondary: #a89f91;
+  --text-on-glow: #11100e;
   --border-hairline: #2c2822;
   --border-strong: #f4efe6;
 }
@@ -62,6 +79,7 @@ html[data-atmosphere="night"] {
 
 html {
   scroll-behavior: smooth;
+  scroll-padding-block-start: calc(var(--header-height) + 1rem);
 }
 
 body {
@@ -72,11 +90,105 @@ body {
     color 650ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/*
+  Visible keyboard focus ring across all interactive elements and inputs.
+  Never strip outlines without a high-contrast replacement.
+*/
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-glow);
+  outline-offset: 2px;
+}
+
+/*
+  Mobile touch hygiene: drop the legacy double-tap delay on interactive
+  elements without touching pinch-zoom (no viewport scaling is disabled).
+*/
+:where(a, button, input, select, textarea, summary, [role="button"]) {
+  touch-action: manipulation;
+}
+
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
 
+/*
+  Intrinsic dual-label / multi-state stacking primitive:
+  Places active and inactive locale/state labels in the same CSS Grid cell
+  ([grid-area: 1 / 1]). The browser sizes the container to the widest/tallest
+  child intrinsically at any font size or zoom level — zero magic widths/heights.
+*/
+.intrinsic-stack {
+  display: inline-grid;
+  align-items: center;
+  justify-items: center;
+}
+
+.intrinsic-stack-start {
+  display: grid;
+  align-items: center;
+  justify-items: start;
+}
+
+.intrinsic-stack > *,
+.intrinsic-stack-start > * {
+  grid-area: 1 / 1;
+}
+
+.intrinsic-ghost {
+  visibility: hidden;
+  block-size: 0;
+  overflow: clip;
+  pointer-events: none;
+  user-select: none;
+}
+
+@media (max-width: 639px) {
+  .sm-only-inline-grid {
+    display: none !important;
+  }
+}
+
+@media (min-width: 640px) {
+  .sm-only-inline-grid {
+    display: inline-grid !important;
+  }
+}
+
+/*
+  Defensive scroll container hygiene: stable scrollbar gutter and contained
+  overscroll so drawers/modals/tables never chain scroll to the page body.
+*/
+.scroll-contain {
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+/*
+  Horizontal indicator strip: touch/trackpad swipeable, snap-centred rails
+  (atmosphere, colourway, series chips) with no visible scrollbar chrome.
+  Children stay intrinsically sized so trailing items bleed off-edge, which is
+  the affordance telling the visitor the rail scrolls.
+*/
+.reel-x {
+  display: flex;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.reel-x::-webkit-scrollbar {
+  display: none;
+}
+
+.reel-x > * {
+  scroll-snap-align: center;
+  flex: none;
+}
+
 .glass-header {
+  min-block-size: var(--header-height);
   background-color: var(--surface-glass);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -96,13 +208,22 @@ body {
     box-shadow 500ms ease;
 }
 
-.card-exhibition:hover {
-  border-color: var(--color-glow);
+@media (hover: hover) and (pointer: fine) {
+  .card-exhibition:hover {
+    border-color: var(--color-glow);
+  }
 }
 
 .stage-surface {
   background-color: var(--surface-stage);
+  overflow: clip;
   transition: background-color 650ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .group:hover .stage-photo-zoom {
+    transform: scale(1.03);
+  }
 }
 
 /*

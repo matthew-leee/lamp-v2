@@ -29,6 +29,12 @@ const SETTING_DEFS: readonly SettingDef[] = [
     envVar: "NEXT_PUBLIC_BRAND_NAME_NATIVE",
   },
   {
+    key: "brand.logo_url",
+    label: "Brand Logo Image URL",
+    hint: "Company logo rendered in the storefront header. Paste an uploaded /uploads/... path or an absolute https:// URL. Leave empty (or Turn OFF) to show the wordmark instead.",
+    envVar: "NEXT_PUBLIC_BRAND_LOGO_URL",
+  },
+  {
     key: "site.url",
     label: "Canonical Site URL",
     hint: "Absolute public URL without trailing slash (used for SEO canonicals & email receipts). Required.",
@@ -171,7 +177,7 @@ export default async function AdminSettingsPage({
                     ? overrideVal
                     : envVal || (def.key === "currency" ? "HKD" : "")
                 }
-                className="w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2 text-sm"
+                className="w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2 text-base sm:text-sm"
               />
 
               <div className="flex flex-wrap items-center gap-3 pt-1">

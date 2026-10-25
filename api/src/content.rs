@@ -34,6 +34,7 @@ pub struct SettingsResponse(pub BTreeMap<String, String>);
 pub const PUBLIC_SETTING_KEYS: &[&str] = &[
     "brand.name",
     "brand.name_native",
+    "brand.logo_url",
     "site.url",
     "contact.whatsapp",
     "analytics.ga_measurement_id",
@@ -148,6 +149,7 @@ mod tests {
             [
                 "brand.name",
                 "brand.name_native",
+                "brand.logo_url",
                 "site.url",
                 "contact.whatsapp",
                 "analytics.ga_measurement_id",

@@ -4,6 +4,7 @@ import { adminFetch, requireAdmin } from "@/lib/admin-auth";
 import { fetchLiveStockMap, loadStorefrontData, type ArtVariant } from "@/lib/api";
 import { formatMoney } from "@/lib/format";
 import LampStage from "@/components/lamp-stage";
+import AdminCsvSyncClient from "@/components/admin-csv-sync-client";
 
 export const metadata: Metadata = { title: "Products & Pieces" };
 export const dynamic = "force-dynamic";
@@ -45,7 +46,7 @@ export default async function AdminProductsPage({
   );
 
   const inputClass =
-    "w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-sm";
+    "w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-base sm:text-sm";
 
   return (
     <div className="space-y-8">
@@ -82,8 +83,11 @@ export default async function AdminProductsPage({
         </div>
       )}
 
+      {/* 1-Click Excel/CSV Bulk Sync (DATA-01): dry-run diff before any write */}
+      <AdminCsvSyncClient mode="products" />
+
       {/* Products Table */}
-      <div className="overflow-x-auto border border-[var(--border-hairline)] bg-[var(--surface-card)]">
+      <div className="scroll-contain overflow-x-auto border border-[var(--border-hairline)] bg-[var(--surface-card)]">
         <table className="w-full border-collapse text-left text-sm">
           <thead>
             <tr className="border-b border-[var(--border-hairline)] text-xs uppercase tracking-[0.14em] text-[var(--text-secondary)]">

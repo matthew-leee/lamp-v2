@@ -4,17 +4,21 @@ import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useStorefront } from "./storefront-context";
 import LampStage from "./lamp-stage";
-import type { CatalogueProduct } from "@/lib/api";
+import {
+  catalogueProductFromOrderItem,
+  type CatalogueProduct,
+  type PublicOrderItem,
+} from "@/lib/api";
 import { formatEditionBadge, formatMoney, formatProductTitle } from "@/lib/format";
 import { htmlLang, t, ui, type Locale } from "@/lib/i18n";
 
-export interface PublicOrderItemData {
-  product_id: number;
-  product_slug: string;
-  quantity: number;
-  unit_price_cents: number;
-  line_total_cents: number;
-}
+/**
+ * `GET /api/orders/{order_code}` line item. Carries the enriched metadata
+ * snapshot (`model`, `brand`, photos, art config, dimensions) so a SKU that was
+ * DEACTIVATED after the sale still renders its real title and photograph here
+ * even though the public catalogue no longer lists it.
+ */
+export type PublicOrderItemData = PublicOrderItem;
 
 export interface PublicOrderData {
   order_code: string;
@@ -116,6 +120,17 @@ export default function CheckoutSettlementClient({
     return () => clearInterval(timer);
   }, [order.expires_at]);
 
+  // Mobile ergonomics: the email-receipt preview is a modal, so Escape must
+  // dismiss it exactly like the backdrop click already does.
+  useEffect(() => {
+    if (!showEmailModal) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowEmailModal(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showEmailModal]);
+
   // STRIPE-01: if returning from a hosted Stripe Checkout session with ?session_id=..., verify immediately
   useEffect(() => {
     if (!returnSessionId || order.status === "paid" || order.status === "fulfilled") return;
@@ -171,9 +186,13 @@ export default function CheckoutSettlementClient({
         ];
 
   const enrichedItems = orderItems.map((it) => {
+    // DATA-01 / CART-01: catalogue first, then the order's own snapshot — a
+    // deactivated SKU is gone from the catalogue but its order still knows the
+    // model, brand, photos and CAD config.
     const found =
       allProducts.find((p) => p.slug === it.product_slug) ??
-      (product?.slug === it.product_slug ? product : null);
+      (product?.slug === it.product_slug ? product : null) ??
+      catalogueProductFromOrderItem(it);
     // LANG-01: strictly locale-specific copy — `zh-HK` never falls back to
     // English product copy.
     const copy = found?.content[lang] ?? {};
@@ -372,6 +391,13 @@ export default function CheckoutSettlementClient({
     (lang === "zh-HK" ? "請向專員查詢或於後台設定" : "Pending Admin Configuration");
   const displayFpsAccount =
     fpsAccountName ?? brandName;
+  // NAME-01: the raw `brandName` stays the FPS payee source of truth (never
+  // back-filled, so `fpsAccountName ?? brandName` stays honest). Only the
+  // PRESENTATIONAL eyebrow substitutes the localized exhibition title when the
+  // operator has not configured a brand, which prevents a bare
+  // " · HONG KONG VAULT" eyebrow instead of persisting a placeholder anywhere.
+  const displayBrandTitle =
+    brandName.trim() !== "" ? brandName : t(ui.defaultExhibitionTitle, lang);
 
   return (
     <div className="mx-auto max-w-6xl px-5 pb-28 pt-10 sm:px-10">
@@ -428,11 +454,11 @@ export default function CheckoutSettlementClient({
       <div className="mt-8 grid items-start gap-10 lg:grid-cols-12">
         {/* Left Column: Payment Settlement or Paid Collector Certificate */}
         <div className="lg:col-span-7">
-          <div className="card-exhibition p-6 sm:p-8">
+          <div className="card-exhibition p-4 sm:p-8">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--border-hairline)] pb-5">
               <div>
                 <p className="text-[11px] tracking-[0.22em] uppercase text-[var(--text-secondary)]">
-                  {brandName} · {lang === "zh-HK" ? "香港典藏庫" : "HONG KONG VAULT"}
+                  {displayBrandTitle} · {lang === "zh-HK" ? "香港典藏庫" : "HONG KONG VAULT"}
                 </p>
                 <h1
                   lang={htmlLang[lang]}
@@ -515,7 +541,7 @@ export default function CheckoutSettlementClient({
                       <dt className="text-[var(--text-secondary)]">
                         {lang === "zh-HK" ? "訂單編號" : "Order Reference"}
                       </dt>
-                      <dd className="tabular-nums mt-1 font-mono text-sm font-semibold">
+                      <dd className="tabular-nums mt-1 font-mono text-sm font-semibold break-all sm:break-normal">
                         {order.order_code}
                       </dd>
                     </div>
@@ -578,7 +604,7 @@ export default function CheckoutSettlementClient({
                         type="button"
                         disabled={paying}
                         onClick={handleHostedStripeCheckout}
-                        className="bg-[var(--color-glow)] px-5 py-3 text-xs font-semibold tracking-[0.18em] uppercase text-[#11100e] hover:opacity-90 disabled:opacity-50"
+                        className="min-h-11 bg-[var(--color-glow)] px-5 py-3 text-xs font-semibold tracking-[0.18em] uppercase text-[var(--text-on-glow)] hover:opacity-90 disabled:opacity-50"
                       >
                         {lang === "zh-HK"
                           ? "前往 Stripe 付款 →"
@@ -605,7 +631,7 @@ export default function CheckoutSettlementClient({
                       <button
                         type="button"
                         onClick={autofillSuccessCard}
-                        className="border border-[var(--color-glow)] px-2.5 py-1 text-[11px] tracking-[0.1em] uppercase text-[var(--color-glow)] hover:bg-[var(--color-glow)] hover:text-[#11100e]"
+                        className="border border-[var(--color-glow)] px-2.5 py-1 text-[11px] tracking-[0.1em] uppercase text-[var(--color-glow)] hover:bg-[var(--color-glow)] hover:text-[var(--text-on-glow)]"
                       >
                         {lang === "zh-HK"
                           ? "填入測試卡 (4242 成功)"
@@ -642,7 +668,7 @@ export default function CheckoutSettlementClient({
                       required
                       value={cardholderName}
                       onChange={(e) => setCardholderName(e.target.value)}
-                      className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 text-sm uppercase"
+                      className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 text-base uppercase sm:text-sm"
                     />
                   </div>
 
@@ -658,7 +684,7 @@ export default function CheckoutSettlementClient({
                       placeholder="4242 4242 4242 4242"
                       value={cardNumber}
                       onChange={(e) => setCardNumber(e.target.value)}
-                      className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
+                      className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-base sm:text-sm"
                     />
                   </div>
 
@@ -674,7 +700,7 @@ export default function CheckoutSettlementClient({
                         placeholder="12/29"
                         value={expiry}
                         onChange={(e) => setExpiry(e.target.value)}
-                        className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
+                        className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-base sm:text-sm"
                       />
                     </div>
                     <div className="flex flex-col gap-1.5">
@@ -689,7 +715,7 @@ export default function CheckoutSettlementClient({
                         placeholder="888"
                         value={cvc}
                         onChange={(e) => setCvc(e.target.value)}
-                        className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
+                        className="tabular-nums border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-base sm:text-sm"
                       />
                     </div>
                   </div>
@@ -697,7 +723,7 @@ export default function CheckoutSettlementClient({
                   <button
                     type="submit"
                     disabled={paying}
-                    className="w-full bg-[var(--color-glow)] py-4 text-xs font-semibold tracking-[0.22em] uppercase text-[#11100e] transition-opacity hover:opacity-90 disabled:opacity-50"
+                    className="min-h-11 w-full bg-[var(--color-glow)] py-4 text-xs font-semibold tracking-[0.22em] uppercase text-[var(--text-on-glow)] transition-opacity hover:opacity-90 disabled:opacity-50"
                   >
                     {paying
                       ? lang === "zh-HK"
@@ -756,7 +782,7 @@ export default function CheckoutSettlementClient({
                       <dt className="text-[var(--text-secondary)]">
                         {lang === "zh-HK" ? "轉帳備註編號" : "Required Remark"}
                       </dt>
-                      <dd className="tabular-nums mt-1 font-mono text-sm font-semibold">
+                      <dd className="tabular-nums mt-1 font-mono text-sm font-semibold break-all sm:break-normal">
                         {order.order_code}
                       </dd>
                     </div>
@@ -771,7 +797,7 @@ export default function CheckoutSettlementClient({
                       <img
                         src={fpsQrUrl}
                         alt="FPS QR Code"
-                        className="mt-2 h-40 w-40 border border-[var(--border-hairline)] bg-white object-contain p-2"
+                        className="mt-2 aspect-square size-40 border border-[var(--border-hairline)] bg-white object-contain p-2"
                       />
                     </div>
                   )}
@@ -812,13 +838,13 @@ export default function CheckoutSettlementClient({
                       placeholder="e.g. FPS-20261015-99281"
                       value={fpsRefInput}
                       onChange={(e) => setFpsRefInput(e.target.value)}
-                      className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-sm"
+                      className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 font-mono text-base sm:text-sm"
                     />
                   </div>
                   <button
                     type="submit"
                     disabled={paying}
-                    className="w-full bg-[var(--color-glow)] py-3.5 text-xs font-semibold tracking-[0.2em] uppercase text-[#11100e]"
+                    className="min-h-11 w-full bg-[var(--color-glow)] py-3.5 text-xs font-semibold tracking-[0.2em] uppercase text-[var(--text-on-glow)]"
                   >
                     {paying
                       ? lang === "zh-HK"
@@ -897,7 +923,7 @@ export default function CheckoutSettlementClient({
                 </p>
                 <Link
                   href={`/${lang}/products/${order.product_slug}`}
-                  className="inline-block bg-[var(--text-primary)] px-6 py-3 text-xs tracking-[0.18em] uppercase text-[var(--surface-page)]"
+                  className="inline-flex min-h-11 items-center bg-[var(--text-primary)] px-6 py-3 text-xs tracking-[0.18em] uppercase text-[var(--surface-page)]"
                 >
                   {lang === "zh-HK" ? "重新選購作品 →" : "Reserve Piece Again →"}
                 </Link>
@@ -908,17 +934,20 @@ export default function CheckoutSettlementClient({
 
         {/* Right Column: Order Summary Card (All Cart Line Items) */}
         <div className="lg:col-span-5">
-          <div className="card-exhibition p-6 sm:p-8">
+          <div className="card-exhibition p-4 sm:p-8">
             <p className="text-[11px] tracking-[0.2em] uppercase text-[var(--text-secondary)]">
               {lang === "zh-HK" ? "典藏訂單摘要" : "EDITION ORDER SUMMARY"}
             </p>
-            <p className="tabular-nums mt-1 font-mono text-sm font-medium">
+            <p className="tabular-nums mt-1 font-mono text-sm font-medium break-all sm:break-normal">
               {order.order_code}
             </p>
 
             <div className="mt-5 divide-y divide-[var(--border-hairline)] border-y border-[var(--border-hairline)]">
               {enrichedItems.map((it) => (
-                <div key={it.product_slug} className="flex gap-4 py-4">
+                /* `@container` per summary row: the unit-price / line-total row
+                   measures the row's own inline width (thumbnail excluded) and
+                   stacks below 15rem instead of overflowing a 320px phone. */
+                <div key={it.product_slug} className="@container flex gap-4 py-4">
                   {it.product && (
                     <div className="w-20 shrink-0">
                       <LampStage
@@ -932,14 +961,14 @@ export default function CheckoutSettlementClient({
                       />
                     </div>
                   )}
-                  <div className="flex flex-1 flex-col justify-center">
+                  <div className="flex min-w-0 flex-1 flex-col justify-center">
                     {it.badge && (
                       <p className="text-[10px] tracking-[0.16em] uppercase text-[var(--text-secondary)]">
                         {it.badge}
                       </p>
                     )}
                     <h3 className="mt-0.5 font-display text-base">{it.title}</h3>
-                    <div className="mt-1 flex items-baseline justify-between text-xs text-[var(--text-secondary)]">
+                    <div className="mt-1 flex flex-col gap-0.5 text-xs text-[var(--text-secondary)] @[15rem]:flex-row @[15rem]:items-baseline @[15rem]:justify-between">
                       <span className="tabular-nums">
                         {formatMoney(it.unit_price_cents, order.currency)} ×{" "}
                         {it.quantity}
@@ -965,7 +994,9 @@ export default function CheckoutSettlementClient({
                   <dt className="text-[var(--text-secondary)]">
                     {lang === "zh-HK" ? "已提交 FPS 編號" : "Submitted FPS Ref"}
                   </dt>
-                  <dd className="font-mono font-medium">{order.fps_reference}</dd>
+                  <dd className="font-mono font-medium break-all sm:break-normal">
+                    {order.fps_reference}
+                  </dd>
                 </div>
               )}
               <div className="flex items-baseline justify-between border-t border-[var(--border-hairline)] pt-4 text-sm font-semibold">
@@ -990,7 +1021,7 @@ export default function CheckoutSettlementClient({
             if (e.target === e.currentTarget) setShowEmailModal(false);
           }}
         >
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto border border-[var(--border-hairline)] bg-[var(--surface-card)] p-6">
+          <div className="scroll-contain max-h-[90dvh] w-full max-w-2xl overflow-y-auto border border-[var(--border-hairline)] bg-[var(--surface-card)] p-6">
             <div className="flex items-center justify-between border-b border-[var(--border-hairline)] pb-4">
               <div>
                 <p className="text-[10px] tracking-[0.2em] uppercase text-[var(--color-glow)]">
@@ -1011,7 +1042,7 @@ export default function CheckoutSettlementClient({
               </button>
             </div>
             <div
-              className="mt-4 overflow-hidden border border-[var(--border-hairline)]"
+              className="mt-4 overflow-clip border border-[var(--border-hairline)]"
               dangerouslySetInnerHTML={{ __html: order.email_receipt.html }}
             />
           </div>

@@ -8,7 +8,6 @@ import LampStage from "./lamp-stage";
 import type { CatalogueProduct } from "@/lib/api";
 import {
   buildWhatsAppUrl,
-  computeSavingsPercent,
   formatEditionBadge,
   formatMoney,
   formatProductTitle,
@@ -20,7 +19,25 @@ import {
   pendingAttemptFingerprint,
   saveRecentOrder,
 } from "@/lib/recent-order";
-import { htmlLang, t, ui, type Locale } from "@/lib/i18n";
+import { htmlLang, t, ui, type BilingualText, type Locale } from "@/lib/i18n";
+
+function IntrinsicBilingualSpan({
+  text,
+  lang,
+}: {
+  text: BilingualText;
+  lang: Locale;
+}) {
+  const otherLocale: Locale = lang === "en" ? "zh-HK" : "en";
+  return (
+    <span className="intrinsic-stack">
+      <span>{t(text, lang)}</span>
+      <span aria-hidden="true" className="intrinsic-ghost">
+        {t(text, otherLocale)}
+      </span>
+    </span>
+  );
+}
 
 interface ProductStoryClientProps {
   lang: Locale;
@@ -32,7 +49,6 @@ interface ProductStoryClientProps {
   copy: {
     disclosure: string;
     warrantyPending: string;
-    referencePending: string;
     enquiryMessage: string;
   };
 }
@@ -77,6 +93,11 @@ export default function ProductStoryClient({
   const isSoldOut = avail !== null && avail <= 0;
   const maxSelectable = avail !== null && avail > 0 ? avail : 1;
 
+  // PDP-01: distinct lamp models (PH 2/1, PH 3/2, PH 1/1 Piano) are NOT
+  // colourways of one another — only render colour swatches for true
+  // multi-colourway families (e.g. Panthella 160).
+  const allSameModel = siblings.every((sib) => sib.model === product.model);
+
   // G01 recovery: a lost response on the LAST unit leaves the shopper's own
   // unpaid hold showing "sold out" while their pay attempt is still
   // replayable. Read the durable attempt store after mount (localStorage is
@@ -89,15 +110,6 @@ export default function ProductStoryClient({
   // The express checkout must open and submit when the product is available
   // OR when a pending attempt exists to replay and recover.
   const canOpenCheckout = !isSoldOut || canRecoverPending;
-
-  const ref = product.reference_price;
-  const savings = ref
-    ? computeSavingsPercent(
-        product.price_cents,
-        ref.min_price_cents,
-        ref.max_price_cents,
-      )
-    : null;
 
   const whatsappHref = buildWhatsAppUrl(whatsappNumber, copy.enquiryMessage);
 
@@ -192,7 +204,7 @@ export default function ProductStoryClient({
       {/* Main Two-Column Architecture */}
       <div className="mt-10 grid items-start gap-12 lg:grid-cols-12 lg:gap-16">
         {/* Left Column: Sticky 3-Mode Interactive Light Studio */}
-        <div className="lg:sticky lg:top-24 lg:col-span-7">
+        <div className="lg:sticky lg:top-[calc(var(--header-height)+1.5rem)] lg:col-span-7">
           <div className="card-exhibition p-4 sm:p-6">
             <LampStage
               hue={product.art_hue}
@@ -205,6 +217,7 @@ export default function ProductStoryClient({
               mode={stageMode}
               aspectClass="aspect-square"
               altText={title}
+              priority
             />
 
             {/* Light Studio Switcher (hides 2700K when single-photo only, hides Scale when art_variant === "none") */}
@@ -218,7 +231,9 @@ export default function ProductStoryClient({
               return (
                 <div
                   className={`mt-4 grid gap-2 ${
-                    hasLitPhoto && hasScaleTab ? "grid-cols-3" : "grid-cols-2"
+                    hasLitPhoto && hasScaleTab
+                      ? "grid-cols-1 min-[380px]:grid-cols-3"
+                      : "grid-cols-1 min-[340px]:grid-cols-2"
                   }`}
                 >
                   <button
@@ -228,13 +243,13 @@ export default function ProductStoryClient({
                       setLit(false);
                     }}
                     aria-pressed={stageMode === "photo" && (!lit || !hasLitPhoto)}
-                    className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
+                    className={`min-h-10 border px-2 py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
                       stageMode === "photo" && (!lit || !hasLitPhoto)
-                        ? "border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
+                        ? "border-[var(--text-primary)] bg-[var(--text-primary)] font-medium text-[var(--surface-page)]"
                         : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     }`}
                   >
-                    {t(ui.stageModeDay, lang)}
+                    <IntrinsicBilingualSpan text={ui.stageModeDay} lang={lang} />
                   </button>
 
                   {hasLitPhoto && (
@@ -245,13 +260,13 @@ export default function ProductStoryClient({
                         setLit(true);
                       }}
                       aria-pressed={stageMode === "photo" && lit}
-                      className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
+                      className={`min-h-10 border px-2 py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
                         stageMode === "photo" && lit
-                          ? "border-[var(--color-glow)] bg-[var(--color-glow)] text-[#11100e] font-semibold"
+                          ? "border-[var(--color-glow)] bg-[var(--color-glow)] font-semibold text-[var(--text-on-glow)]"
                           : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                       }`}
                     >
-                      {t(ui.stageModeNight, lang)}
+                      <IntrinsicBilingualSpan text={ui.stageModeNight} lang={lang} />
                     </button>
                   )}
 
@@ -260,13 +275,13 @@ export default function ProductStoryClient({
                       type="button"
                       onClick={() => setStageMode("scale")}
                       aria-pressed={stageMode === "scale"}
-                      className={`border py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
+                      className={`min-h-10 border px-2 py-2.5 text-xs tracking-[0.14em] uppercase transition-colors ${
                         stageMode === "scale"
-                          ? "border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
+                          ? "border-[var(--text-primary)] bg-[var(--text-primary)] font-medium text-[var(--surface-page)]"
                           : "border-[var(--border-hairline)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                       }`}
                     >
-                      {t(ui.stageModeScale, lang)}
+                      <IntrinsicBilingualSpan text={ui.stageModeScale} lang={lang} />
                     </button>
                   )}
                 </div>
@@ -275,7 +290,7 @@ export default function ProductStoryClient({
           </div>
         </div>
 
-        {/* Right Column: Collector Decision, Swatches, Market Price & Specs */}
+        {/* Right Column: Collector Decision, Sibling Models / Swatches & Specs */}
         <div className="lg:col-span-5">
           <p className="text-xs tracking-[0.2em] uppercase text-[var(--text-secondary)]">
             {[product.brand, product.designer, product.design_year]
@@ -321,63 +336,67 @@ export default function ProductStoryClient({
             </div>
           </div>
 
-          {/* Sibling Colourway Swatches (when family has multiple SKUs) */}
+          {/* Sibling Switcher: real colourways vs. other models in the series */}
           {siblings.length > 1 && (
             <div className="mt-6">
               <p className="text-[11px] tracking-[0.18em] uppercase text-[var(--text-secondary)]">
-                {t(ui.colourwaysHeading, lang)} ({siblings.length})
+                {allSameModel
+                  ? t(ui.colourwaysHeading, lang)
+                  : t(ui.seriesModelsHeading, lang)}{" "}
+                ({siblings.length})
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
-                {(() => {
-                  const allSameModel = siblings.every(
-                    (s) => s.model === product.model,
-                  );
-                  return siblings.map((sib) => {
-                    const sibCopy = sib.content[lang] ?? {};
-                    const sibLabel = allSameModel
-                      ? sibCopy.colourway || sib.model
-                      : formatProductTitle(
-                          sib.model,
-                          sibCopy.model_alt,
-                          sibCopy.colourway,
-                          lang,
-                        );
-                    const isCurrent = sib.slug === product.slug;
-                    return (
-                      <Link
-                        key={sib.slug}
-                        href={`/${lang}/products/${sib.slug}`}
-                        aria-current={isCurrent ? "page" : undefined}
-                        className={`flex items-center gap-2 border px-3 py-2 text-xs transition-all ${
-                          isCurrent
-                            ? "border-[var(--color-glow)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
-                            : "border-[var(--border-hairline)] bg-[var(--surface-card)] text-[var(--text-primary)] hover:border-[var(--color-glow)]"
-                        }`}
-                      >
+                {siblings.map((sib) => {
+                  const sibCopy = sib.content[lang] ?? {};
+                  const sibLabel = allSameModel
+                    ? sibCopy.colourway || sib.model
+                    : formatProductTitle(
+                        sib.model,
+                        sibCopy.model_alt,
+                        sibCopy.colourway,
+                        lang,
+                      );
+                  const isCurrent = sib.slug === product.slug;
+                  return (
+                    <Link
+                      key={sib.slug}
+                      href={`/${lang}/products/${sib.slug}`}
+                      aria-current={isCurrent ? "page" : undefined}
+                      className={`flex min-h-10 items-center gap-2 border px-3 py-2 text-xs transition-all ${
+                        isCurrent
+                          ? "border-[var(--color-glow)] bg-[var(--text-primary)] text-[var(--surface-page)] font-medium"
+                          : "border-[var(--border-hairline)] bg-[var(--surface-card)] text-[var(--text-primary)] hover:border-[var(--color-glow)]"
+                      }`}
+                    >
+                      {allSameModel && (
                         <span
                           className="inline-block size-2.5 rounded-full border border-black/20"
                           style={{
                             backgroundColor: `hsl(${sib.art_hue} 65% 65%)`,
                           }}
                         />
-                        <span>{sibLabel}</span>
-                      </Link>
-                    );
-                  });
-                })()}
+                      )}
+                      <span>{sibLabel}</span>
+                    </Link>
+                  );
+                })}
               </div>
             </div>
           )}
 
           {/* Purchase & Instant Checkout Controls */}
-          <div className="mt-8 flex flex-col gap-3">
+          {/* `@container`: the quantity stepper and Add to Cart stack or sit
+              side-by-side based on THIS panel's own inline width (the PDP grid
+              column), not the viewport, so the same markup works in the wide
+              7/12 story column and any narrower host layout. */}
+          <div className="@container mt-8 flex flex-col gap-3">
             {!isSoldOut && (
-              <div className="flex items-center gap-3">
-                <div className="flex items-center border border-[var(--border-hairline)] bg-[var(--surface-card)]">
+              <div className="flex flex-col gap-3 @[18rem]:flex-row @[18rem]:items-center">
+                <div className="flex items-center justify-between border border-[var(--border-hairline)] bg-[var(--surface-card)]">
                   <button
                     type="button"
                     onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                    className="px-3.5 py-3 text-sm hover:bg-[var(--surface-elevated)]"
+                    className="min-h-11 min-w-11 px-3.5 py-3 text-sm hover:bg-[var(--surface-elevated)]"
                     aria-label="Decrease quantity"
                   >
                     −
@@ -391,7 +410,7 @@ export default function ProductStoryClient({
                     onClick={() =>
                       setQuantity((q) => Math.min(maxSelectable, q + 1))
                     }
-                    className="px-3.5 py-3 text-sm hover:bg-[var(--surface-elevated)] disabled:opacity-30"
+                    className="min-h-11 min-w-11 px-3.5 py-3 text-sm hover:bg-[var(--surface-elevated)] disabled:opacity-30"
                     aria-label="Increase quantity"
                   >
                     +
@@ -401,9 +420,9 @@ export default function ProductStoryClient({
                 <button
                   type="button"
                   onClick={() => addToBag(product.slug, quantity, true)}
-                  className="flex-1 border border-[var(--border-strong)] bg-[var(--surface-card)] py-3.5 text-xs font-medium tracking-[0.18em] uppercase text-[var(--text-primary)] transition-colors hover:border-[var(--color-glow)]"
+                  className="min-h-11 flex-1 border border-[var(--border-strong)] bg-[var(--surface-card)] py-3.5 text-xs font-medium tracking-[0.18em] uppercase text-[var(--text-primary)] transition-colors hover:border-[var(--color-glow)]"
                 >
-                  {t(ui.addToBag, lang)}
+                  <IntrinsicBilingualSpan text={ui.addToBag} lang={lang} />
                 </button>
               </div>
             )}
@@ -412,7 +431,7 @@ export default function ProductStoryClient({
               type="button"
               disabled={!canOpenCheckout}
               onClick={() => setExpressCheckoutOpen((o) => !o)}
-              className="w-full bg-[var(--text-primary)] py-4 text-xs font-semibold tracking-[0.22em] uppercase text-[var(--surface-page)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35"
+              className="min-h-12 w-full bg-[var(--text-primary)] py-4 text-xs font-semibold tracking-[0.22em] uppercase text-[var(--surface-page)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-35"
             >
               {isSoldOut
                 ? canRecoverPending
@@ -492,7 +511,7 @@ export default function ProductStoryClient({
                     required
                     value={customerName}
                     onChange={(e) => setCustomerName(e.target.value)}
-                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-sm"
+                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-base sm:text-sm"
                   />
                 </div>
                 <div className="flex flex-col gap-1">
@@ -505,7 +524,7 @@ export default function ProductStoryClient({
                     required
                     value={customerEmail}
                     onChange={(e) => setCustomerEmail(e.target.value)}
-                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-sm"
+                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-base sm:text-sm"
                   />
                 </div>
               </div>
@@ -521,7 +540,7 @@ export default function ProductStoryClient({
                     required
                     value={customerPhone}
                     onChange={(e) => setCustomerPhone(e.target.value)}
-                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-sm"
+                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-base sm:text-sm"
                   />
                 </div>
                 <div className="flex flex-col gap-1">
@@ -534,7 +553,7 @@ export default function ProductStoryClient({
                     required
                     value={deliveryAddress}
                     onChange={(e) => setDeliveryAddress(e.target.value)}
-                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-sm"
+                    className="border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-base sm:text-sm"
                   />
                 </div>
               </div>
@@ -542,7 +561,7 @@ export default function ProductStoryClient({
               <button
                 type="submit"
                 disabled={submitting}
-                className="w-full bg-[var(--color-glow)] py-3.5 text-xs font-semibold tracking-[0.2em] uppercase text-[#11100e] disabled:opacity-50"
+                className="w-full bg-[var(--color-glow)] py-3.5 text-xs font-semibold tracking-[0.2em] uppercase text-[var(--text-on-glow)] disabled:opacity-50"
               >
                 {submitting
                   ? lang === "zh-HK"
@@ -558,74 +577,6 @@ export default function ProductStoryClient({
               </button>
             </form>
           )}
-
-          {/* Market Price Transparency Card */}
-          <div className="card-exhibition mt-8 p-5">
-            <div className="flex items-center justify-between">
-              <p className="text-[11px] tracking-[0.18em] uppercase text-[var(--text-secondary)]">
-                {t(ui.marketPriceTitle, lang)}
-              </p>
-              {savings && (
-                <span className="bg-[var(--color-glow)] px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] uppercase text-[#11100e]">
-                  {lang === "zh-HK"
-                    ? `節省 ${savings.minPct}%–${savings.maxPct}%`
-                    : `SAVE ${savings.minPct}%–${savings.maxPct}%`}
-                </span>
-              )}
-            </div>
-
-            {ref ? (
-              <div className="mt-4">
-                <div className="flex items-baseline justify-between text-xs">
-                  <span className="text-[var(--text-secondary)]">
-                    {t(ui.dealerRangeLabel, lang)}
-                  </span>
-                  <span className="tabular-nums font-medium">
-                    {formatMoney(ref.min_price_cents, currency)} –{" "}
-                    {formatMoney(ref.max_price_cents, currency)}
-                  </span>
-                </div>
-
-                {/* Visual comparison bar */}
-                <div className="mt-2.5 h-2 w-full overflow-hidden bg-[var(--border-hairline)]">
-                  <div
-                    className="h-full bg-[var(--color-glow)]"
-                    style={{
-                      width: `${Math.min(
-                        95,
-                        Math.max(
-                          25,
-                          Math.round(
-                            (product.price_cents / ref.max_price_cents) * 100,
-                          ),
-                        ),
-                      )}%`,
-                    }}
-                  />
-                </div>
-
-                <p className="mt-3 text-[11px] text-[var(--text-secondary)]">
-                  {t(ui.verifiedOnLabel, lang)} {ref.checked_on} ·{" "}
-                  <a
-                    href={ref.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    lang="en"
-                    className="underline hover:text-[var(--text-primary)]"
-                  >
-                    {ref.source_name} ↗
-                  </a>
-                </p>
-              </div>
-            ) : (
-              <p
-                lang={htmlLang[lang]}
-                className="mt-3 text-xs leading-relaxed text-[var(--text-secondary)]"
-              >
-                {copy.referencePending}
-              </p>
-            )}
-          </div>
 
           {/* Swiss-Grid Architectural Specifications */}
           {specRows.length > 0 && (

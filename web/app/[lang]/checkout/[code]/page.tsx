@@ -1,5 +1,9 @@
 import { notFound } from "next/navigation";
-import { getApiBaseUrl, loadStorefrontData } from "@/lib/api";
+import {
+  catalogueProductFromOrderItem,
+  getApiBaseUrl,
+  loadStorefrontData,
+} from "@/lib/api";
 import {
   buildOrderEmailHtml,
   type EmailOrderItemSummary,
@@ -37,8 +41,17 @@ export default async function CheckoutSettlementPage({
 
   const order = (await orderRes.json()) as PublicOrderData;
   const { catalogue, config } = storefront;
+
+  // DATA-01 / CART-01: an SKU deactivated after the sale is no longer in the
+  // public catalogue, so fall back to the enriched snapshot carried by the
+  // order itself — the Collector's Pass must still show the real product.
+  const orderItemsForDisplay = order.items ?? [];
+  const primaryItemSnapshot =
+    orderItemsForDisplay.find((it) => it.product_slug === order.product_slug) ??
+    orderItemsForDisplay[0];
   const product =
-    catalogue.products.find((p) => p.slug === order.product_slug) ?? null;
+    catalogue.products.find((p) => p.slug === order.product_slug) ??
+    catalogueProductFromOrderItem(primaryItemSnapshot);
 
   const rawItems =
     order.items && order.items.length > 0
@@ -54,7 +67,9 @@ export default async function CheckoutSettlementPage({
         ];
 
   const itemSummaries: EmailOrderItemSummary[] = rawItems.map((it) => {
-    const p = catalogue.products.find((cp) => cp.slug === it.product_slug);
+    const p =
+      catalogue.products.find((cp) => cp.slug === it.product_slug) ??
+      catalogueProductFromOrderItem(it);
     const copy = p?.content[locale] ?? {};
     const title = p
       ? formatProductTitle(p.model, copy.model_alt, copy.colourway, locale)

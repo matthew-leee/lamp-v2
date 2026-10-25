@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { adminFetch, requireAdmin } from "@/lib/admin-auth";
+import AdminCsvSyncClient from "@/components/admin-csv-sync-client";
 
 export const metadata: Metadata = { title: "Site Copy Studio" };
 export const dynamic = "force-dynamic";
@@ -71,6 +72,9 @@ export default async function AdminSiteContentPage({
         </div>
       )}
 
+      {/* 1-Click Excel/CSV Bulk Sync for bilingual site copy (DATA-01) */}
+      <AdminCsvSyncClient mode="site-content" />
+
       <div className="space-y-5">
         {keys.map((key) => {
           const meta = HUMAN_LABELS[key];
@@ -109,7 +113,7 @@ export default async function AdminSiteContentPage({
                     name="value_en"
                     rows={3}
                     defaultValue={enVal}
-                    className="mt-1 w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-sm"
+                    className="mt-1 w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-base sm:text-sm"
                   />
                 </div>
                 <div>
@@ -120,7 +124,7 @@ export default async function AdminSiteContentPage({
                     name="value_zh"
                     rows={3}
                     defaultValue={zhVal}
-                    className="mt-1 w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-sm"
+                    className="mt-1 w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3 py-2 text-base sm:text-sm"
                   />
                 </div>
               </div>

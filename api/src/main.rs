@@ -43,7 +43,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use lamp_api::{
-    admin, admin_crud, catalogue, config, content, orders,
+    admin, admin_crud, catalogue, config, content, csv_sync, orders,
     state::{self, AppState},
 };
 use serde::Serialize;
@@ -170,6 +170,25 @@ fn app(state: AppState) -> Router {
             post(orders::quarantine_return_order),
         )
         .route("/audit-log", get(admin_crud::list_audit_log))
+        // 1-Click Excel/CSV Bulk Sync (DATA-01): UTF-8 BOM export, dry-run
+        // preview and atomic commit for the catalogue and the bilingual site
+        // copy. All six routes carry the same require_admin + CSRF middleware
+        // as the rest of the console.
+        .route("/csv/products", get(csv_sync::export_products_csv))
+        .route("/csv/products/preview", post(csv_sync::preview_products_csv))
+        .route("/csv/products/commit", post(csv_sync::commit_products_csv))
+        .route(
+            "/csv/site-content",
+            get(csv_sync::export_site_content_csv),
+        )
+        .route(
+            "/csv/site-content/preview",
+            post(csv_sync::preview_site_content_csv),
+        )
+        .route(
+            "/csv/site-content/commit",
+            post(csv_sync::commit_site_content_csv),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin::require_admin,

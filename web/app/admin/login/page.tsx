@@ -50,7 +50,7 @@ export default async function AdminLoginPage({
               type="text"
               autoComplete="username"
               required
-              className="mt-1 w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 text-sm"
+              className="mt-1 w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 text-base sm:text-sm"
             />
           </div>
           <div>
@@ -66,12 +66,12 @@ export default async function AdminLoginPage({
               type="password"
               autoComplete="current-password"
               required
-              className="mt-1 w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 text-sm"
+              className="mt-1 w-full border border-[var(--border-hairline)] bg-[var(--surface-page)] px-3.5 py-2.5 text-base sm:text-sm"
             />
           </div>
           <button
             type="submit"
-            className="mt-2 w-full bg-[var(--text-primary)] py-3 text-xs font-medium tracking-[0.2em] uppercase text-[var(--surface-page)]"
+            className="mt-2 min-h-11 w-full bg-[var(--text-primary)] py-3 text-xs font-medium tracking-[0.2em] uppercase text-[var(--surface-page)]"
           >
             Sign In
           </button>

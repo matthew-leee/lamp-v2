@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { requireAdmin } from "@/lib/admin-auth";
 import { loadStorefrontData } from "@/lib/api";
+import DevAgentation from "@/components/dev-agentation";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,7 @@ export default async function AdminAuthedLayout({
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <header className="border-b border-[var(--border-hairline)] bg-[var(--surface-card)] px-6 py-4">
+      <header className="border-b border-[var(--border-hairline)] bg-[var(--surface-card)] px-4 py-4 sm:px-6">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-8">
             <Link
@@ -92,9 +93,10 @@ export default async function AdminAuthedLayout({
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-8">
+      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-4 sm:px-6 sm:py-8">
         {children}
       </main>
+      <DevAgentation />
     </div>
   );
 }

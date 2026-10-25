@@ -41,7 +41,33 @@ function isValidSiteUrl(value: string): boolean {
   }
 }
 
+/**
+ * Brand logo (ENV-01): either an UPLOADED asset under the site's own public
+ * tree (`/uploads/brand-logo.png`, as produced by `/admin/api/upload`) or an
+ * absolute http(s) URL. Protocol-relative (`//evil.example/x.png`), `data:`,
+ * `javascript:` and bare filenames are all refused so the header `<img src>`
+ * can never be pointed at a foreign scheme.
+ */
+function isValidBrandLogoUrl(value: string): boolean {
+  if (value.startsWith("/")) {
+    if (value.startsWith("//")) return false;
+    // Whitespace, angle brackets and quotes would break out of the attribute
+    // (or the surrounding markup) once the URL is rendered.
+    return !/[\s<>"'`\\]/.test(value);
+  }
+  // An absolute http(s) URL with an EXPLICIT authority: the WHATWG parser turns
+  // the typo `http:///logo.png` into host `logo.png`, which is not what the
+  // operator meant, so the authority is checked on the raw string as well.
+  if (!/^https?:\/\//i.test(value)) return false;
+  if (value.replace(/^https?:\/\//i, "").startsWith("/")) return false;
+  return isValidSiteUrl(value);
+}
+
 export const SETTING_VALUE_RULES: Record<string, SettingValueRule> = {
+  "brand.logo_url": {
+    hint: "must be an uploaded /path/to/logo.png or an absolute http(s) URL",
+    isValid: isValidBrandLogoUrl,
+  },
   "analytics.ga_measurement_id": {
     hint: "must be a GA4 Measurement ID like G-XXXXXXXXXX",
     isValid: (value) => /^G-[A-Z0-9]{4,12}$/.test(value),

@@ -101,7 +101,7 @@ jobs:
           NEXT_PUBLIC_SITE_URL: http://localhost:3000
           NEXT_PUBLIC_API_URL: http://127.0.0.1:18080
         run: |
-          BRAND="$(PGPASSWORD=verify-only psql -h 127.0.0.1 -p 55432 -U ci_user -d storefront_verify -tAc "SELECT COALESCE((SELECT value FROM settings WHERE key='brand.name'), 'ATELIER')")"
+          BRAND="$(PGPASSWORD=verify-only psql -h 127.0.0.1 -p 55432 -U ci_user -d storefront_verify -tAc "SELECT COALESCE((SELECT value FROM settings WHERE key='brand.name'), 'TESTBRAND')")"
           NEXT_PUBLIC_BRAND_NAME="$BRAND" npm run build
       - name: Run full web test suite
         working-directory: web

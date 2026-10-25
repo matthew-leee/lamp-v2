@@ -30,7 +30,7 @@ export default async function AdminAuditPage() {
         </h1>
       </div>
 
-      <div className="overflow-x-auto border border-[var(--border-hairline)] bg-[var(--surface-card)]">
+      <div className="scroll-contain overflow-x-auto border border-[var(--border-hairline)] bg-[var(--surface-card)]">
         <table className="w-full border-collapse text-left text-xs">
           <thead>
             <tr className="border-b border-[var(--border-hairline)] uppercase tracking-[0.14em] text-[var(--text-secondary)]">

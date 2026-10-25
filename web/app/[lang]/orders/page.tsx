@@ -63,7 +63,7 @@ export default function OrderLookupPage() {
         ← {t(ui.backToCollection, lang)}
       </Link>
 
-      <div className="card-exhibition mt-8 p-8 sm:p-10">
+      <div className="card-exhibition mt-8 p-5 sm:p-10">
         <p className="text-[11px] tracking-[0.22em] uppercase text-[var(--color-glow)]">
           {lang === "zh-HK" ? "藏家自助服務" : "COLLECTOR SELF-SERVICE"}
         </p>
@@ -84,12 +84,14 @@ export default function OrderLookupPage() {
                 `/${lang}/checkout/${encodeURIComponent(recentOrder.order_code)}`,
               )
             }
-            className="mt-5 flex w-full items-center justify-between border border-[var(--color-glow)] bg-[var(--surface-elevated)] px-4 py-3 text-left text-xs transition-colors hover:border-[var(--text-primary)]"
+            className="mt-5 flex min-h-11 w-full items-center justify-between gap-3 border border-[var(--color-glow)] bg-[var(--surface-elevated)] px-4 py-3 text-left text-xs transition-colors hover:border-[var(--text-primary)]"
           >
             <span>
-              {lang === "zh-HK"
-                ? `繼續最近訂單 ${recentOrder.order_code}`
-                : `Resume recent order ${recentOrder.order_code}`}
+              {lang === "zh-HK" ? "繼續最近訂單 " : "Resume recent order "}
+              {/* Long ORD-… codes must wrap instead of overflowing a 320px phone. */}
+              <span className="tabular-nums break-all font-mono sm:break-normal">
+                {recentOrder.order_code}
+              </span>
             </span>
             <span aria-hidden="true">→</span>
           </button>
@@ -112,12 +114,12 @@ export default function OrderLookupPage() {
             value={orderCode}
             onChange={(e) => setOrderCode(e.target.value)}
             aria-label={lang === "zh-HK" ? "訂單編號" : "Order Reference Code"}
-            className="flex-1 border border-[var(--border-hairline)] bg-[var(--surface-page)] px-4 py-3 font-mono text-sm"
+            className="flex-1 border border-[var(--border-hairline)] bg-[var(--surface-page)] px-4 py-3 font-mono text-base sm:text-sm"
           />
           <button
             type="submit"
             disabled={checking}
-            className="bg-[var(--text-primary)] px-7 py-3 text-xs font-medium tracking-[0.2em] uppercase text-[var(--surface-page)] disabled:opacity-50"
+            className="min-h-11 bg-[var(--text-primary)] px-7 py-3 text-xs font-medium tracking-[0.2em] uppercase text-[var(--surface-page)] disabled:opacity-50"
           >
             {checking
               ? lang === "zh-HK"

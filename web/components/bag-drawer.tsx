@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useStorefront } from "./storefront-context";
@@ -45,6 +45,18 @@ export default function BagDrawer({
   const [deliveryAddress, setDeliveryAddress] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Mobile ergonomics: a slide-over drawer must close on Escape like any other
+  // dialog. Registered unconditionally (before the `!bagOpen` early return) so
+  // the hook order never changes between renders.
+  useEffect(() => {
+    if (!bagOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setBagOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [bagOpen, setBagOpen]);
 
   if (!bagOpen) return null;
 
@@ -102,6 +114,10 @@ export default function BagDrawer({
           delivery_address: deliveryAddress.trim(),
           locale: lang,
           idempotency_key: idempotencyKey,
+          // CART-01 price-change detection: the total the customer actually
+          // SAW in the cart. If an admin changed a price in the meantime the
+          // API answers 409 instead of charging a different amount.
+          expected_total_cents: subtotalCents,
         }),
       });
 
@@ -154,7 +170,9 @@ export default function BagDrawer({
         if (e.target === e.currentTarget) setBagOpen(false);
       }}
     >
-      <div className="flex h-full w-full max-w-lg flex-col justify-between border-l border-[var(--border-hairline)] bg-[var(--surface-page)] p-6 text-[var(--text-primary)] shadow-2xl sm:p-8">
+      {/* `@container` so the empty-bag discovery grid responds to the DRAWER
+          width (max-w-lg) rather than the viewport, on any phone. */}
+      <div className="@container flex h-full w-full max-w-lg flex-col justify-between border-l border-[var(--border-hairline)] bg-[var(--surface-page)] p-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-[var(--text-primary)] shadow-2xl sm:p-8">
         {/* Top bar */}
         <div className="flex items-center justify-between border-b border-[var(--border-hairline)] pb-5">
           <div>
@@ -166,14 +184,14 @@ export default function BagDrawer({
           <button
             type="button"
             onClick={() => setBagOpen(false)}
-            className="border border-[var(--border-hairline)] px-3.5 py-1.5 text-xs tracking-[0.16em] uppercase text-[var(--text-secondary)] transition-colors hover:border-[var(--text-primary)] hover:text-[var(--text-primary)]"
+            className="min-h-10 border border-[var(--border-hairline)] px-3.5 py-2 text-xs tracking-[0.16em] uppercase text-[var(--text-secondary)] transition-colors hover:border-[var(--text-primary)] hover:text-[var(--text-primary)]"
           >
             {lang === "zh-HK" ? "關閉" : "Close"}
           </button>
         </div>
 
         {/* Body */}
-        <div className="my-6 flex-1 overflow-y-auto pr-1">
+        <div className="scroll-contain my-6 flex-1 overflow-y-auto pr-1">
           {populatedItems.length === 0 ? (
             /* Awwwards 'Outfit' Pattern: Curated Empty Bag Discovery */
             <div className="flex flex-col gap-6 py-4">
@@ -183,7 +201,7 @@ export default function BagDrawer({
                   {t(ui.bagEmptySubtitle, lang)}
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 @[22rem]:grid-cols-2">
                 {catalogueProducts.slice(0, 4).map((prod) => {
                   const copy = prod.content[lang] ?? {};
                   const name = formatProductTitle(
@@ -196,7 +214,7 @@ export default function BagDrawer({
                   return (
                     <div
                       key={prod.slug}
-                      className="card-exhibition flex flex-col justify-between p-3"
+                      className="card-exhibition row-span-3 grid grid-rows-subgrid gap-y-2 p-3"
                     >
                       <Link
                         href={`/${lang}/products/${prod.slug}`}
@@ -210,19 +228,26 @@ export default function BagDrawer({
                           imageDayUrl={prod.image_day_url}
                           imageLitUrl={prod.image_lit_url}
                           aspectClass="aspect-square"
+                          compact
                         />
-                        <p className="mt-2.5 line-clamp-1 text-xs font-medium">
+                      </Link>
+                      <div>
+                        <Link
+                          href={`/${lang}/products/${prod.slug}`}
+                          onClick={() => setBagOpen(false)}
+                          className="block text-xs font-medium leading-snug hover:underline"
+                        >
                           {name}
-                        </p>
+                        </Link>
                         <p className="tabular-nums mt-0.5 text-xs text-[var(--text-secondary)]">
                           {formatMoney(prod.price_cents, currency)}
                         </p>
-                      </Link>
+                      </div>
                       <button
                         type="button"
                         disabled={avail <= 0}
                         onClick={() => addToBag(prod.slug, 1, false)}
-                        className="mt-3 w-full border border-[var(--border-hairline)] py-1.5 text-[11px] tracking-[0.14em] uppercase transition-colors hover:border-[var(--color-glow)] disabled:opacity-40"
+                        className="min-h-11 self-end w-full border border-[var(--border-hairline)] py-1.5 text-[11px] tracking-[0.14em] uppercase transition-colors hover:border-[var(--color-glow)] disabled:opacity-40"
                       >
                         {avail > 0
                           ? t(ui.addToBag, lang)
@@ -249,9 +274,12 @@ export default function BagDrawer({
                   lang,
                 );
                 return (
+                  // `@container` per line item: the stepper + line total row
+                  // measures THIS card's own inline width and stacks below
+                  // 22rem, so a 320px phone never overflows.
                   <div
                     key={slug}
-                    className="flex gap-4 border border-[var(--border-hairline)] bg-[var(--surface-card)] p-4"
+                    className="@container flex gap-4 border border-[var(--border-hairline)] bg-[var(--surface-card)] p-4"
                   >
                     <div className="w-20 shrink-0">
                       <LampStage
@@ -264,7 +292,7 @@ export default function BagDrawer({
                         compact
                       />
                     </div>
-                    <div className="flex flex-1 flex-col justify-between">
+                    <div className="flex min-w-0 flex-1 flex-col justify-between">
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <p className="text-[10px] tracking-[0.16em] uppercase text-[var(--text-secondary)]">
@@ -281,18 +309,18 @@ export default function BagDrawer({
                         <button
                           type="button"
                           onClick={() => removeFromBag(slug)}
-                          className="shrink-0 whitespace-nowrap text-xs text-[var(--text-secondary)] hover:text-[var(--color-error)]"
+                          className="inline-flex min-h-9 shrink-0 items-center justify-center whitespace-nowrap px-2.5 text-xs text-[var(--text-secondary)] hover:text-[var(--color-error)]"
                         >
                           {lang === "zh-HK" ? "移除" : "Remove"}
                         </button>
                       </div>
 
-                      <div className="mt-3 flex items-center justify-between">
+                      <div className="mt-3 flex flex-col items-start gap-2 @[22rem]:flex-row @[22rem]:items-center @[22rem]:justify-between">
                         <div className="flex items-center border border-[var(--border-hairline)]">
                           <button
                             type="button"
                             onClick={() => updateBagQuantity(slug, quantity - 1)}
-                            className="px-2.5 py-1 text-xs hover:bg-[var(--surface-elevated)]"
+                            className="min-h-9 min-w-9 px-2.5 py-1.5 text-xs hover:bg-[var(--surface-elevated)]"
                             aria-label="Decrease quantity"
                           >
                             −
@@ -304,7 +332,7 @@ export default function BagDrawer({
                             type="button"
                             disabled={quantity >= maxAvail}
                             onClick={() => updateBagQuantity(slug, quantity + 1)}
-                            className="px-2.5 py-1 text-xs hover:bg-[var(--surface-elevated)] disabled:opacity-30"
+                            className="min-h-9 min-w-9 px-2.5 py-1.5 text-xs hover:bg-[var(--surface-elevated)] disabled:opacity-30"
                             aria-label="Increase quantity"
                           >
                             +
@@ -386,7 +414,7 @@ export default function BagDrawer({
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
                   placeholder={lang === "zh-HK" ? "例如：Chan Tai Man" : "e.g. Alex Chan"}
-                  className="border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                  className="border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3 py-2 text-base text-[var(--text-primary)] sm:text-sm"
                 />
               </div>
 
@@ -401,7 +429,7 @@ export default function BagDrawer({
                   value={customerEmail}
                   onChange={(e) => setCustomerEmail(e.target.value)}
                   placeholder="collector@example.com"
-                  className="border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                  className="border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3 py-2 text-base text-[var(--text-primary)] sm:text-sm"
                 />
               </div>
 
@@ -416,7 +444,7 @@ export default function BagDrawer({
                   value={customerPhone}
                   onChange={(e) => setCustomerPhone(e.target.value)}
                   placeholder="+852 9123 4567"
-                  className="border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                  className="border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3 py-2 text-base text-[var(--text-primary)] sm:text-sm"
                 />
               </div>
 
@@ -435,7 +463,7 @@ export default function BagDrawer({
                       ? "中環 / 九龍 / 新界詳細地址"
                       : "Flat, Floor, Building, Street, District, Hong Kong"
                   }
-                  className="border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                  className="border border-[var(--border-hairline)] bg-[var(--surface-card)] px-3 py-2 text-base text-[var(--text-primary)] sm:text-sm"
                 />
               </div>
             </form>
@@ -462,7 +490,7 @@ export default function BagDrawer({
                 <button
                   type="button"
                   onClick={() => setCheckoutStep(true)}
-                  className="w-full bg-[var(--text-primary)] py-3.5 text-xs font-medium tracking-[0.2em] uppercase text-[var(--surface-page)] transition-opacity hover:opacity-90"
+                  className="min-h-11 w-full bg-[var(--text-primary)] py-3.5 text-xs font-medium tracking-[0.2em] uppercase text-[var(--surface-page)] transition-opacity hover:opacity-90"
                 >
                   {t(ui.bagProceedCheckout, lang)}
                 </button>
@@ -479,7 +507,7 @@ export default function BagDrawer({
                 type="submit"
                 form="bag-checkout-form"
                 disabled={submitting}
-                className="mt-4 w-full bg-[var(--color-glow)] py-3.5 text-xs font-semibold tracking-[0.2em] uppercase text-[#11100e] transition-opacity hover:opacity-90 disabled:opacity-50"
+                className="mt-4 min-h-11 w-full bg-[var(--color-glow)] py-3.5 text-xs font-semibold tracking-[0.2em] uppercase text-[var(--text-on-glow)] transition-opacity hover:opacity-90 disabled:opacity-50"
               >
                 {submitting
                   ? lang === "zh-HK"

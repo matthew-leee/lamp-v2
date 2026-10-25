@@ -10,7 +10,7 @@ export const htmlLang: Record<Locale, string> = {
 
 export const languageEndonyms: Record<Locale, string> = {
   en: "EN",
-  "zh-HK": "繁體中文",
+  "zh-HK": "中文",
 };
 
 export function isLocale(value: string): value is Locale {
@@ -29,12 +29,14 @@ export function t(map: BilingualText, locale: Locale): string {
 
 export const ui = {
   navCollection: { en: "Collection", "zh-HK": "典藏系列" },
-  navEditionMatrix: { en: "Edition 01–16", "zh-HK": "編號 01–16" },
   navProvenance: { en: "Provenance", "zh-HK": "平行進口來源" },
   navOrderLookup: { en: "Order Lookup", "zh-HK": "訂單查詢" },
   navBag: { en: "Shopping Cart", "zh-HK": "購物車" },
   atmosphereDay: { en: "Daylight 5500K", "zh-HK": "日光 5500K" },
   atmosphereNight: { en: "Nocturne 2700K", "zh-HK": "夜覽 2700K" },
+  atmosphereDayShort: { en: "5500K", "zh-HK": "5500K" },
+  atmosphereNightShort: { en: "2700K", "zh-HK": "2700K" },
+  defaultExhibitionTitle: { en: "LIGHTING EXHIBITION", "zh-HK": "建築燈飾典藏展" },
   viewCanvas: { en: "Exhibition Grid", "zh-HK": "展廳陳列" },
   viewIndex: { en: "Archival Index", "zh-HK": "典藏目錄" },
   filterAll: { en: "All Pieces", "zh-HK": "全部作品" },
@@ -53,11 +55,16 @@ export const ui = {
   stageModeDay: { en: "Daylight Cutout", "zh-HK": "日光實物" },
   stageModeNight: { en: "2700K Lit", "zh-HK": "2700K 點亮" },
   stageModeScale: { en: "Scale & Blueprint", "zh-HK": "比例與藍圖" },
-  colourwaysHeading: { en: "Finish & Colourway", "zh-HK": "表面處理與配色" },
-  marketPriceTitle: { en: "Market Price Transparency", "zh-HK": "市場透明定價比較" },
+  colourwaysHeading: { en: "Finish & Colourway", "zh-HK": "色調及表面處理" },
+  seriesModelsHeading: {
+    en: "Other Models in This Series",
+    "zh-HK": "同系列其他燈飾型號",
+  },
+  heroCarouselPrev: { en: "Previous Piece", "zh-HK": "上一件作品" },
+  heroCarouselNext: { en: "Next Piece", "zh-HK": "下一件作品" },
+  heroCarouselPause: { en: "Pause rotation", "zh-HK": "暫停輪播" },
+  heroCarouselPlay: { en: "Resume rotation", "zh-HK": "繼續輪播" },
   housePriceLabel: { en: "House Direct Price", "zh-HK": "本店直購價" },
-  dealerRangeLabel: { en: "HK Authorised Showroom", "zh-HK": "香港授權陳列室定價" },
-  verifiedOnLabel: { en: "Verified on", "zh-HK": "查核日期" },
   specDesigner: { en: "Designer", "zh-HK": "設計師" },
   specYear: { en: "Year", "zh-HK": "設計年份" },
   specDimensions: { en: "Dimensions", "zh-HK": "尺寸規格" },

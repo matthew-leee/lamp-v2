@@ -15,6 +15,8 @@ interface LampStageProps {
   aspectClass?: string;
   altText?: string;
   compact?: boolean;
+  priority?: boolean;
+  fit?: "cover" | "contain";
 }
 
 function ArchitecturalSilhouette({
@@ -39,9 +41,7 @@ function ArchitecturalSilhouette({
   return (
     <svg
       viewBox="0 0 480 480"
-      className="
-        pointer-events-none absolute inset-0 h-full w-full transition-opacity duration-500
-      "
+      className="pointer-events-none absolute inset-0 h-full w-full transition-opacity duration-500"
       aria-hidden="true"
     >
       {blueprint && (
@@ -147,6 +147,8 @@ export default function LampStage({
   aspectClass = "aspect-[4/5]",
   altText,
   compact = false,
+  priority = false,
+  fit = "cover",
 }: LampStageProps) {
   const [dayImgFailed, setDayImgFailed] = useState(false);
   const [litImgFailed, setLitImgFailed] = useState(false);
@@ -167,9 +169,16 @@ export default function LampStage({
   const canCrossFade =
     hasLitEffect && primaryDay !== "" && primaryLit !== "" && primaryDay !== primaryLit;
 
+  // `fit="contain"` keeps the full sculptural silhouette (shade top through
+  // base) inside the stage on short 16:9 laptop folds; the padding gives the
+  // lamp breathing room instead of letting it touch the stage frame.
+  const fitClass = fit === "contain" ? "object-contain p-3 sm:p-4" : "object-cover";
+  const loadingAttr = priority ? "eager" : "lazy";
+  const fetchPriorityAttr = priority ? "high" : "auto";
+
   return (
     <div
-      className={`stage-surface relative w-full overflow-hidden border border-[var(--border-hairline)] ${aspectClass}`}
+      className={`stage-surface relative w-full border border-[var(--border-hairline)] ${aspectClass}`}
       style={{ "--art-hue": String(hue) } as CSSProperties}
       role={altText ? "img" : undefined}
       aria-label={altText}
@@ -195,12 +204,11 @@ export default function LampStage({
           <img
             src={primaryDay}
             alt=""
-            loading="eager"
-            decoding="sync"
+            loading={loadingAttr}
+            fetchPriority={fetchPriorityAttr}
+            decoding="async"
             onError={() => setDayImgFailed(true)}
-            className={`absolute inset-0 h-full w-full object-contain ${
-              compact ? "p-2" : "p-7"
-            } transition-all duration-700 ease-out group-hover:scale-[1.03] ${
+            className={`stage-photo-zoom absolute inset-0 h-full w-full ${fitClass} object-center transition-all duration-700 ease-out ${
               canCrossFade && lit ? "opacity-0" : "opacity-100"
             }`}
           />
@@ -211,12 +219,11 @@ export default function LampStage({
               <img
                 src={primaryLit}
                 alt=""
-                loading="eager"
-                decoding="sync"
+                loading={loadingAttr}
+                fetchPriority={fetchPriorityAttr}
+                decoding="async"
                 onError={() => setLitImgFailed(true)}
-                className={`absolute inset-0 h-full w-full object-contain ${
-                  compact ? "p-2" : "p-7"
-                } transition-all duration-700 ease-out group-hover:scale-[1.03] ${
+                className={`stage-photo-zoom absolute inset-0 h-full w-full ${fitClass} object-center transition-all duration-700 ease-out ${
                   lit ? "opacity-100" : "opacity-0"
                 }`}
               />
