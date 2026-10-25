@@ -880,8 +880,8 @@ async fn load_order_items_tx(
     .bind(fallback_product_id)
     .fetch_optional(&mut **tx)
     .await?;
-    let (model, brand, image_day_url, image_lit_url, art_variant, art_hue, dimensions) =
-        enrichment.unwrap_or_else(|| {
+    let (model, brand, image_day_url, image_lit_url, art_variant, art_hue, dimensions) = enrichment
+        .unwrap_or_else(|| {
             (
                 String::new(),
                 String::new(),
@@ -1305,7 +1305,9 @@ enum ReserveRejection {
     /// The cart's authoritative total no longer matches `expected_total_cents`
     /// (an admin price edit landed while the customer was in checkout): the
     /// handler refuses with a 409 and the current total.
-    PriceChanged { current_total_cents: i64 },
+    PriceChanged {
+        current_total_cents: i64,
+    },
 }
 
 enum ReserveFailure {

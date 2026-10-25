@@ -452,7 +452,11 @@ fn build_table(header_record: CsvRecord, rows: Vec<CsvRecord>) -> Result<CsvTabl
             return Err(format!("duplicate column {name:?} in the header"));
         }
     }
-    Ok(CsvTable { header, index, rows })
+    Ok(CsvTable {
+        header,
+        index,
+        rows,
+    })
 }
 
 /// Parses the products CSV: strips the BOM, checks the header (exact column
@@ -875,8 +879,8 @@ fn resolve_stock_existing(
         }
         _ => i64::from(db.total),
     };
-    let effective = i32::try_from(resolved)
-        .map_err(|_| "resulting stock_total is out of range".to_string())?;
+    let effective =
+        i32::try_from(resolved).map_err(|_| "resulting stock_total is out of range".to_string())?;
     if i64::from(effective) < i64::from(db.reserved) + i64::from(db.quarantined) {
         return Err("stock_total must be >= stock_reserved + stock_quarantined".to_string());
     }
@@ -978,7 +982,12 @@ fn parse_product_row(
             Ok(id) if id > 0 => Some(id),
             Ok(0) => None,
             _ => {
-                push_error(&mut errors, line, "id", "id must be 0 (new row) or a product id");
+                push_error(
+                    &mut errors,
+                    line,
+                    "id",
+                    "id must be 0 (new row) or a product id",
+                );
                 None
             }
         },
@@ -1246,7 +1255,9 @@ async fn load_products(conn: &mut PgConnection, lock: bool) -> Result<Vec<DbProd
              light_source \
          FROM products ORDER BY id"
     };
-    sqlx::query_as::<_, DbProduct>(sql).fetch_all(&mut *conn).await
+    sqlx::query_as::<_, DbProduct>(sql)
+        .fetch_all(&mut *conn)
+        .await
 }
 
 /// Validates one row's piece list against the database ownership map and the
@@ -1318,7 +1329,10 @@ async fn plan_products_csv(
                 .fetch_all(&mut *conn)
                 .await?;
         for (piece_no, product_id) in rows {
-            pieces_by_product.entry(product_id).or_default().push(piece_no);
+            pieces_by_product
+                .entry(product_id)
+                .or_default()
+                .push(piece_no);
             piece_owner.insert(piece_no, product_id);
         }
     }
@@ -1506,19 +1520,49 @@ async fn plan_products_csv(
                     if db.active { "true" } else { "false" },
                     if effective_active { "true" } else { "false" },
                 );
-                push_change(&mut changes, "art_variant", &db.art_variant, &input.art_variant);
+                push_change(
+                    &mut changes,
+                    "art_variant",
+                    &db.art_variant,
+                    &input.art_variant,
+                );
                 push_change(
                     &mut changes,
                     "art_hue",
                     &db.art_hue.to_string(),
                     &input.art_hue.to_string(),
                 );
-                push_change(&mut changes, "image_day_url", &db.image_day_url, &input.image_day_url);
-                push_change(&mut changes, "image_lit_url", &db.image_lit_url, &input.image_lit_url);
+                push_change(
+                    &mut changes,
+                    "image_day_url",
+                    &db.image_day_url,
+                    &input.image_day_url,
+                );
+                push_change(
+                    &mut changes,
+                    "image_lit_url",
+                    &db.image_lit_url,
+                    &input.image_lit_url,
+                );
                 push_change(&mut changes, "designer", &db.designer, &input.designer);
-                push_change(&mut changes, "design_year", &db.design_year, &input.design_year);
-                push_change(&mut changes, "dimensions", &db.dimensions, &input.dimensions);
-                push_change(&mut changes, "light_source", &db.light_source, &input.light_source);
+                push_change(
+                    &mut changes,
+                    "design_year",
+                    &db.design_year,
+                    &input.design_year,
+                );
+                push_change(
+                    &mut changes,
+                    "dimensions",
+                    &db.dimensions,
+                    &input.dimensions,
+                );
+                push_change(
+                    &mut changes,
+                    "light_source",
+                    &db.light_source,
+                    &input.light_source,
+                );
                 if decision.write {
                     push_change(
                         &mut changes,
@@ -1594,7 +1638,12 @@ async fn plan_products_csv(
                 push_change(&mut changes, "slug", "", &input.slug);
                 push_change(&mut changes, "brand", "", &input.brand);
                 push_change(&mut changes, "model", "", &input.model);
-                push_change(&mut changes, "price_hkd", "", &format_price_hkd(input.price_cents));
+                push_change(
+                    &mut changes,
+                    "price_hkd",
+                    "",
+                    &format_price_hkd(input.price_cents),
+                );
                 push_change(&mut changes, "family", "", &input.family);
                 push_change(
                     &mut changes,
@@ -2064,7 +2113,11 @@ async fn plan_site_content_csv(
             // Blanking a cell deletes that (key, locale) row: the export
             // always carries every stored row, so a blank is the explicit
             // clear state (never an accidental wipe of unexported copy).
-            let after = if raw.trim().is_empty() { None } else { Some(raw) };
+            let after = if raw.trim().is_empty() {
+                None
+            } else {
+                Some(raw)
+            };
             if before != after {
                 changes.push((locale.clone(), before, after));
             }
@@ -2267,7 +2320,10 @@ pub async fn export_products_csv(State(app): State<AppState>) -> Result<Response
                 .await
                 .map_err(|e| state::database_unavailable("failed to load pieces", &e))?;
         for (piece_no, product_id) in rows {
-            pieces_by_product.entry(product_id).or_default().push(piece_no);
+            pieces_by_product
+                .entry(product_id)
+                .or_default()
+                .push(piece_no);
         }
     }
     let references: Vec<admin_crud::AdminReferencePrice> = sqlx::query_as(
@@ -2297,8 +2353,8 @@ pub async fn export_products_csv(State(app): State<AppState>) -> Result<Response
             .get(&product.id)
             .unwrap_or(&empty_content)
             .clone();
-        let version_hash = admin_crud::compute_product_version_hash(
-            &admin_crud::ProductVersionState {
+        let version_hash =
+            admin_crud::compute_product_version_hash(&admin_crud::ProductVersionState {
                 slug: product.slug.clone(),
                 brand: product.brand.clone(),
                 model: product.model.clone(),
@@ -2315,8 +2371,7 @@ pub async fn export_products_csv(State(app): State<AppState>) -> Result<Response
                 light_source: product.light_source.clone(),
                 content: content.clone(),
                 reference_price: reference_by_product.get(&product.id).cloned(),
-            },
-        );
+            });
         let mut cells: Vec<String> = vec![
             product.id.to_string(),
             product.slug.clone(),
@@ -2416,7 +2471,11 @@ pub async fn commit_products_csv(
         // Nothing is written: drop the transaction (rollback) and answer with
         // the preview so the operator sees every row error.
         drop(tx);
-        return Ok((StatusCode::BAD_REQUEST, Json(build_products_preview(&plan, false))).into_response());
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(build_products_preview(&plan, false)),
+        )
+            .into_response());
     }
     let has_changes = plan
         .plans
@@ -2516,10 +2575,11 @@ pub async fn commit_site_content_csv(
         .map_err(|e| state::database_unavailable("failed to plan the CSV commit", &e))?;
     if !plan.errors.is_empty() {
         drop(tx);
-        return Ok(
-            (StatusCode::BAD_REQUEST, Json(build_site_content_preview(&plan, false)))
-                .into_response(),
-        );
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(build_site_content_preview(&plan, false)),
+        )
+            .into_response());
     }
     let has_changes = plan
         .plans
@@ -2559,8 +2619,8 @@ mod tests {
 
     #[test]
     fn csv_parser_handles_rfc4180_quoting() {
-        let records = parse_csv("a,b\r\n\"x,y\",\"line1\nline2\"\r\n\"he said \"\"hi\"\"\",\r\n")
-            .unwrap();
+        let records =
+            parse_csv("a,b\r\n\"x,y\",\"line1\nline2\"\r\n\"he said \"\"hi\"\"\",\r\n").unwrap();
         assert_eq!(records.len(), 3);
         assert_eq!(records[0].line, 1);
         assert_eq!(records[0].fields, vec!["a", "b"]);
@@ -2652,8 +2712,7 @@ mod tests {
         // The race-review scenario: exported at 5, a customer consumed one,
         // and the CSV carries no operator stock edit. The live count wins and
         // is NOT rewritten.
-        let decision =
-            resolve_stock_existing(true, "keep_db", &db, Some(5), Some(5), 0).unwrap();
+        let decision = resolve_stock_existing(true, "keep_db", &db, Some(5), Some(5), 0).unwrap();
         assert_eq!(decision.effective, 4);
         assert!(!decision.write);
         assert!(!decision.conflict);
@@ -2675,19 +2734,35 @@ mod tests {
         let keep = resolve_stock_existing(true, "keep_db", &db, Some(5), Some(5), 2).unwrap();
         assert!(keep.conflict, "a moved live count must be flagged");
         assert_eq!(keep.effective, 4);
-        assert!(keep.warning.unwrap().contains("stock_conflict_mode=keep_db"));
+        assert!(keep
+            .warning
+            .unwrap()
+            .contains("stock_conflict_mode=keep_db"));
 
         let delta = resolve_stock_existing(true, "apply_delta", &db, Some(5), Some(5), 2).unwrap();
-        assert_eq!(delta.effective, 6, "new stock lands on top of the live count");
+        assert_eq!(
+            delta.effective, 6,
+            "new stock lands on top of the live count"
+        );
 
         let force =
             resolve_stock_existing(true, "force_override", &db, Some(7), Some(5), 0).unwrap();
         assert_eq!(force.effective, 7);
 
         // No conflict: a corrected number still wins via force_override.
-        let corrected =
-            resolve_stock_existing(true, "force_override", &StockCounts { total: 5, reserved: 0, quarantined: 0 }, Some(3), Some(5), 0)
-                .unwrap();
+        let corrected = resolve_stock_existing(
+            true,
+            "force_override",
+            &StockCounts {
+                total: 5,
+                reserved: 0,
+                quarantined: 0,
+            },
+            Some(3),
+            Some(5),
+            0,
+        )
+        .unwrap();
         assert_eq!(corrected.effective, 3);
         assert!(!corrected.conflict);
     }
@@ -2701,10 +2776,16 @@ mod tests {
         };
         let error =
             resolve_stock_existing(true, "force_override", &db, Some(3), Some(4), 0).unwrap_err();
-        assert!(error.contains("stock_reserved + stock_quarantined"), "{error}");
+        assert!(
+            error.contains("stock_reserved + stock_quarantined"),
+            "{error}"
+        );
         let error =
             resolve_stock_existing(true, "apply_delta", &db, Some(4), Some(4), -5).unwrap_err();
-        assert!(error.contains("stock_reserved + stock_quarantined"), "{error}");
+        assert!(
+            error.contains("stock_reserved + stock_quarantined"),
+            "{error}"
+        );
         // The exact boundary is legal.
         let db = StockCounts {
             total: 5,
@@ -2819,7 +2900,12 @@ mod tests {
             };
             // Ambient knobs can turn these tests into live-network calls or
             // move the locale pair; refuse them, naming the variable only.
-            for name in ["PGOPTIONS", "LOCALES", "REVALIDATE_URL", "REVALIDATE_SECRET"] {
+            for name in [
+                "PGOPTIONS",
+                "LOCALES",
+                "REVALIDATE_URL",
+                "REVALIDATE_SECRET",
+            ] {
                 if std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false) {
                     panic!("ambient {name} must be unset for csv_sync DB tests");
                 }
@@ -2834,9 +2920,8 @@ mod tests {
                 .get_host()
                 .trim_start_matches('[')
                 .trim_end_matches(']');
-            let loopback = host.eq_ignore_ascii_case("localhost")
-                || host == "127.0.0.1"
-                || host == "::1";
+            let loopback =
+                host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
             assert!(
                 loopback && opts.get_port() == SCRATCH_DB_PORT,
                 "refusing to run csv_sync DB tests against {}:{} (only \
@@ -2900,9 +2985,12 @@ mod tests {
                 let sql = std::fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("csv_sync harness: cannot read {path}: {e}"));
                 self.block_on(async {
-                    sqlx::raw_sql(&sql).execute(&self.pool).await.unwrap_or_else(|e| {
-                        panic!("csv_sync harness: migration {file_name} failed: {e}")
-                    });
+                    sqlx::raw_sql(&sql)
+                        .execute(&self.pool)
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!("csv_sync harness: migration {file_name} failed: {e}")
+                        });
                 });
             }
         }
@@ -2987,7 +3075,13 @@ mod tests {
 
     /// Rebuilds a CSV with one cell of the matching row replaced. The output is
     /// plain CRLF CSV (the handler strips the BOM itself, so none is added).
-    fn csv_set_cell(csv: &str, match_column: &str, match_value: &str, column: &str, value: &str) -> String {
+    fn csv_set_cell(
+        csv: &str,
+        match_column: &str,
+        match_value: &str,
+        column: &str,
+        value: &str,
+    ) -> String {
         let records = parse_csv(strip_utf8_bom(csv)).expect("export must parse");
         let mut rows: Vec<Vec<String>> = records.into_iter().map(|record| record.fields).collect();
         let header = rows.remove(0);
@@ -3022,11 +3116,13 @@ mod tests {
 
     fn product_stock(db: &TestDb, id: i64) -> (i32, i32, i32) {
         db.block_on(async {
-            sqlx::query_as("SELECT stock_total, stock_reserved, stock_quarantined FROM products WHERE id = $1")
-                .bind(id)
-                .fetch_one(db.pool())
-                .await
-                .expect("product must exist")
+            sqlx::query_as(
+                "SELECT stock_total, stock_reserved, stock_quarantined FROM products WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(db.pool())
+            .await
+            .expect("product must exist")
         })
     }
 
@@ -3129,7 +3225,10 @@ mod tests {
         // 1. No operator stock edit -> the live count must survive a commit.
         let request = products_request(csv_text.clone(), true, "keep_db");
         let response = db
-            .block_on(preview_products_csv(State(state.clone()), Ok(Json(request))))
+            .block_on(preview_products_csv(
+                State(state.clone()),
+                Ok(Json(request)),
+            ))
             .expect("preview must succeed");
         assert_eq!(response.status(), StatusCode::OK);
         let preview = db.block_on(read_json(response));
@@ -3155,7 +3254,10 @@ mod tests {
         let edited = csv_set_cell(&csv_text, "slug", "ph-5", "stock_delta", "2");
         let request = products_request(edited.clone(), true, "apply_delta");
         let response = db
-            .block_on(preview_products_csv(State(state.clone()), Ok(Json(request))))
+            .block_on(preview_products_csv(
+                State(state.clone()),
+                Ok(Json(request)),
+            ))
             .expect("preview must succeed");
         let preview = db.block_on(read_json(response));
         assert_eq!(preview["valid"], true);
@@ -3223,7 +3325,11 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("stock_reserved + stock_quarantined"));
-        assert_eq!(product_stock(&db, id).0, 9, "an invalid commit writes nothing");
+        assert_eq!(
+            product_stock(&db, id).0,
+            9,
+            "an invalid commit writes nothing"
+        );
     }
 
     #[test]
@@ -3273,12 +3379,11 @@ mod tests {
         assert_eq!(preview["updated_count"], 1);
 
         db.block_on(async {
-            let (price,): (i64,) =
-                sqlx::query_as("SELECT price_cents FROM products WHERE id = $1")
-                    .bind(id)
-                    .fetch_one(db.pool())
-                    .await
-                    .unwrap();
+            let (price,): (i64,) = sqlx::query_as("SELECT price_cents FROM products WHERE id = $1")
+                .bind(id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
             assert_eq!(price, 199_990);
             let content: Vec<(String, String)> = sqlx::query_as(
                 "SELECT field, value FROM product_content WHERE product_id = $1 ORDER BY field",
@@ -3300,13 +3405,15 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(pieces, vec![(3,)]);
-            let audits: Vec<(String, String)> = sqlx::query_as(
-                "SELECT action, entity FROM audit_log ORDER BY id DESC LIMIT 1",
-            )
-            .fetch_all(db.pool())
-            .await
-            .unwrap();
-            assert_eq!(audits, vec![("csv_bulk_sync".to_string(), "products".to_string())]);
+            let audits: Vec<(String, String)> =
+                sqlx::query_as("SELECT action, entity FROM audit_log ORDER BY id DESC LIMIT 1")
+                    .fetch_all(db.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(
+                audits,
+                vec![("csv_bulk_sync".to_string(), "products".to_string())]
+            );
             let (stock_total,): (i32,) =
                 sqlx::query_as("SELECT stock_total FROM products WHERE id = $1")
                     .bind(id)
@@ -3342,7 +3449,10 @@ mod tests {
         let scientific = csv_set_cell(&csv_text, "slug", "ph-5", "price_hkd", "1.23E+10");
         let request = products_request(scientific, false, "keep_db");
         let response = db
-            .block_on(preview_products_csv(State(state.clone()), Ok(Json(request))))
+            .block_on(preview_products_csv(
+                State(state.clone()),
+                Ok(Json(request)),
+            ))
             .expect("preview must answer");
         let preview = db.block_on(read_json(response));
         assert_eq!(preview["valid"], false);
@@ -3375,12 +3485,11 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(owner, first, "an invalid commit must not move pieces");
-            let (total,): (i32,) =
-                sqlx::query_as("SELECT stock_total FROM products WHERE id = $1")
-                    .bind(second)
-                    .fetch_one(db.pool())
-                    .await
-                    .unwrap();
+            let (total,): (i32,) = sqlx::query_as("SELECT stock_total FROM products WHERE id = $1")
+                .bind(second)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
             assert_eq!(total, 1, "an invalid commit must not write anything");
         });
     }
@@ -3452,12 +3561,11 @@ mod tests {
             .expect("commit must succeed");
         assert_eq!(response.status(), StatusCode::OK);
         db.block_on(async {
-            let (slug,): (String,) =
-                sqlx::query_as("SELECT slug FROM products WHERE id = $1")
-                    .bind(id)
-                    .fetch_one(db.pool())
-                    .await
-                    .unwrap();
+            let (slug,): (String,) = sqlx::query_as("SELECT slug FROM products WHERE id = $1")
+                .bind(id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
             assert_eq!(slug, "new-slug");
             let (order_slug,): (String,) =
                 sqlx::query_as("SELECT product_slug FROM orders WHERE id = $1")
@@ -3502,7 +3610,10 @@ mod tests {
         let records = parse_csv(strip_utf8_bom(&text)).unwrap();
         assert_eq!(records[0].fields, vec!["key", "en", "zh-HK"]);
         assert_eq!(records[1].fields, vec!["policy.warranty", "One year", ""]);
-        assert_eq!(records[2].fields, vec!["tagline", "Curated light", "精選燈飾"]);
+        assert_eq!(
+            records[2].fields,
+            vec!["tagline", "Curated light", "精選燈飾"]
+        );
 
         // Edit one value, clear another, add a new key.
         let edited = csv_set_cell(&text, "key", "tagline", "en", "Curated light, reimagined");
@@ -3513,7 +3624,10 @@ mod tests {
             csv: edited.clone(),
         };
         let response = db
-            .block_on(preview_site_content_csv(State(state.clone()), Ok(Json(request))))
+            .block_on(preview_site_content_csv(
+                State(state.clone()),
+                Ok(Json(request)),
+            ))
             .expect("preview must succeed");
         let preview = db.block_on(read_json(response));
         assert_eq!(preview["valid"], true);
@@ -3532,20 +3646,15 @@ mod tests {
             .expect("commit must succeed");
         assert_eq!(response.status(), StatusCode::OK);
         db.block_on(async {
-            let rows: Vec<(String, String, String)> = sqlx::query_as(
-                "SELECT key, locale, value FROM site_content ORDER BY key, locale",
-            )
-            .fetch_all(db.pool())
-            .await
-            .unwrap();
+            let rows: Vec<(String, String, String)> =
+                sqlx::query_as("SELECT key, locale, value FROM site_content ORDER BY key, locale")
+                    .fetch_all(db.pool())
+                    .await
+                    .unwrap();
             assert_eq!(
                 rows,
                 vec![
-                    (
-                        "new.key".to_string(),
-                        "en".to_string(),
-                        "Hello".to_string()
-                    ),
+                    ("new.key".to_string(), "en".to_string(), "Hello".to_string()),
                     (
                         "new.key".to_string(),
                         "zh-HK".to_string(),
@@ -3564,12 +3673,11 @@ mod tests {
                 ],
                 "the blanked zh-HK row must be deleted"
             );
-            let audits: Vec<(String, String)> = sqlx::query_as(
-                "SELECT action, entity FROM audit_log ORDER BY id DESC LIMIT 1",
-            )
-            .fetch_all(db.pool())
-            .await
-            .unwrap();
+            let audits: Vec<(String, String)> =
+                sqlx::query_as("SELECT action, entity FROM audit_log ORDER BY id DESC LIMIT 1")
+                    .fetch_all(db.pool())
+                    .await
+                    .unwrap();
             assert_eq!(
                 audits,
                 vec![("csv_bulk_sync".to_string(), "site_content".to_string())]

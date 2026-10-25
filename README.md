@@ -97,11 +97,14 @@ node scripts/vps.mjs exec "docker compose ps"
 ## Development & Verification
 
 ```bash
-# Rust API (port 18080) — DB-backed suite; point it at a scratch Postgres
-# (CI provisions postgres:17 on 55433 with these neutral credentials)
+# Rust API (port 18080) — fmt/clippy gates, then the DB-backed suite pointed at
+# a scratch Postgres (CI provisions postgres:17 on 55433 with these credentials)
+cd api && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 cd api && STOREFRONT_TEST_DATABASE_URL="postgres://ci_user:scratch-only@localhost:55433/storefront_scratch" cargo test  # 285 passed
 # Next.js Web (port 3002) — storefront/admin contracts, mobile ergonomics, hydration stability
 cd web && npm run lint && npm run typecheck && npm run build && npm test  # 63 passed
 ```
+
+**Rust formatting & lint gate (`api/`)**: the `rust` job in `.github/workflows/ci.yml` runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (the same two commands shown above) before the test suite, so a formatting or lint regression fails CI ahead of the tests. Both are green over the 1-click CSV bulk-sync module (`api/src/csv_sync.rs`), the Admin CRUD module (`api/src/admin_crud.rs`), the `/api/admin/csv/*` route registration in `api/src/main.rs` and the order line-item loader in `api/src/orders.rs`. Formatting uses rustfmt's default `newline_style = Auto`, so the LF checkout CI uses stays LF while a CRLF working copy is formatted in place without churn.
 
 The web suite is `web/test/storefront-and-admin.test.mjs`, `web/test/mobile-ergonomics.test.mjs` and `web/test/hydration-stability.test.mjs`. Real-browser evidence (Stage 3 + Stage 5 `.jpg` archives and `INDEX.md` ledgers) lives under `artifacts/ui-audit/<YYYYMMDD>__session-<PI_SESSION_ID>/`.

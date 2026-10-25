@@ -1255,13 +1255,11 @@ pub(crate) async fn cascade_product_slug(
     product_id: i64,
     new_slug: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE orders SET product_slug = $1 WHERE product_id = $2 AND product_slug <> $1",
-    )
-    .bind(new_slug)
-    .bind(product_id)
-    .execute(&mut **tx)
-    .await?;
+    sqlx::query("UPDATE orders SET product_slug = $1 WHERE product_id = $2 AND product_slug <> $1")
+        .bind(new_slug)
+        .bind(product_id)
+        .execute(&mut **tx)
+        .await?;
     sqlx::query(
         "UPDATE order_items SET product_slug = $1 \
          WHERE product_id = $2 AND product_slug <> $1",
@@ -1559,13 +1557,12 @@ pub async fn update_product_full(
     // the request omits or sends blank is DELETED, then every non-blank entry
     // is upserted. Clearing a text box in Admin Studio must remove the old
     // copy row, never leave it resurrected for the storefront to serve.
-    let stored_content: Vec<(String, String)> = sqlx::query_as(
-        "SELECT locale, field FROM product_content WHERE product_id = $1",
-    )
-    .bind(id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|e| state::database_unavailable("failed to load product content", &e))?;
+    let stored_content: Vec<(String, String)> =
+        sqlx::query_as("SELECT locale, field FROM product_content WHERE product_id = $1")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| state::database_unavailable("failed to load product content", &e))?;
     let is_cleared = |locale: &str, field: &str| -> bool {
         input
             .content

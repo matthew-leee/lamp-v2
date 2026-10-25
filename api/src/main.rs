@@ -175,12 +175,12 @@ fn app(state: AppState) -> Router {
         // copy. All six routes carry the same require_admin + CSRF middleware
         // as the rest of the console.
         .route("/csv/products", get(csv_sync::export_products_csv))
-        .route("/csv/products/preview", post(csv_sync::preview_products_csv))
-        .route("/csv/products/commit", post(csv_sync::commit_products_csv))
         .route(
-            "/csv/site-content",
-            get(csv_sync::export_site_content_csv),
+            "/csv/products/preview",
+            post(csv_sync::preview_products_csv),
         )
+        .route("/csv/products/commit", post(csv_sync::commit_products_csv))
+        .route("/csv/site-content", get(csv_sync::export_site_content_csv))
         .route(
             "/csv/site-content/preview",
             post(csv_sync::preview_site_content_csv),
